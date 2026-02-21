@@ -89,31 +89,42 @@ def run_flask():
 # STATES FOR UPLOAD FLOW
 WAIT_TRIM, WAIT_FULL = range(2)
 
-# ================= MAIN BOT: UPLOAD FLOW (SUPER FAST) =================
+# ================= MAIN BOT: UPLOAD FLOW (SUPER FAST + THUMBNAIL) =================
 async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Step 1: Admin /post command deta hai"""
     if update.effective_user.id != ADMIN_USER_ID: return
     
     await update.message.reply_text(
         "⚡ **Super-Fast Post Mode!**\n\n"
-        "✂️ Sabse pehle choti **TRIMMED VIDEO (Preview)** bhejo ya forward karo.\n\n"
-        "*(Tip: Agar aap trim video ke caption mein naam likhoge, toh main usko Title bana lunga!)*", 
+        "✂️ Sabse pehle choti **TRIMMED VIDEO (Preview)** bhejo.\n\n"
+        "*(Agar aapke paas trim video nahi hai, toh bas /skip likh kar bhej do, main Full video ka Thumbnail use kar lunga!)*", 
         parse_mode='Markdown'
     )
     return WAIT_TRIM
 
 async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Step 2: Admin Trim video bhejta hai"""
+    """Step 2: Admin Trim video bhejta hai YA /skip karta hai"""
     msg = update.message
+    
+    # ✅ NAYA FEATURE: Agar user ke paas trim nahi hai
+    if msg.text and msg.text.strip().lower() == '/skip':
+        context.user_data['trim_file'] = 'use_thumbnail' # Bot ko ishara de diya
+        context.user_data['title'] = "🔥 Exclusive Premium Leak 🔥" # Default title
+        await msg.reply_text(
+            "⏭️ **Trim Skipped!**\n\n"
+            "🔞 Ab seedha **FULL HD VIDEO** bhejo. Main uska auto-thumbnail nikal kar Free Channel par post kar dunga!"
+        )
+        return WAIT_FULL
+
+    # Agar normal trim video aati hai:
     if not msg.video and not msg.document and not msg.animation:
-        await msg.reply_text("❌ Error: Ye video nahi hai. Kripya Trimmed Video bhejo.")
+        await msg.reply_text("❌ Error: Ye video nahi hai. Kripya Trimmed Video bhejo ya /skip likho.")
         return WAIT_TRIM
     
-    # Title ko caption se nikalna (Agar caption nahi hai, to default naam lagayega)
+    # Title aur File save karna
     context.user_data['title'] = msg.caption if msg.caption else "🔥 Exclusive Premium Leak 🔥"
-    
-    # File ID save karna
     context.user_data['trim_file'] = msg.video.file_id if msg.video else (msg.animation.file_id if msg.animation else msg.document.file_id)
+    context.user_data['trim_type'] = 'video' # Yaad rakhne ke liye ki ye video hai
     
     await msg.reply_text(
         "✅ **Trim Video Saved!**\n\n"
@@ -132,13 +143,25 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
 
     status = await msg.reply_text("⏳ **Processing Started... (Koi aur command mat dena)**")
     
-    # Agar Trim me caption nahi tha, par Full video me hai, to usko Title bana lo
     title = context.user_data.get('title')
     if title == "🔥 Exclusive Premium Leak 🔥" and msg.caption:
         title = msg.caption
 
-    trim_file_id = context.user_data['trim_file']
     full_file_id = msg.video.file_id if msg.video else msg.document.file_id
+
+    # ✅ NAYA FEATURE: Thumbnail Nikalna (Agar /skip kiya tha)
+    trim_type = context.user_data.get('trim_type', 'video')
+    if context.user_data.get('trim_file') == 'use_thumbnail':
+        trim_type = 'photo' # Kyunki thumbnail ek photo hoti hai
+        if msg.video and msg.video.thumbnail:
+            trim_file_id = msg.video.thumbnail.file_id
+        elif msg.document and msg.document.thumbnail:
+            trim_file_id = msg.document.thumbnail.file_id
+        else:
+            # Agar Telegram ne thumbnail nahi banaya (bohot rare hai), to ek default photo use karega
+            trim_file_id = "https://i.imgur.com/6XK4F6K.png" 
+    else:
+        trim_file_id = context.user_data['trim_file']
 
     # 1. Database me Full Video Save karo
     conn = db_pool.getconn()
@@ -151,8 +174,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # 2. Upload to Backups & Paid Channel
     await status.edit_text("⏳ Uploading Full Video to Backups & Paid Channel...")
-    
-    # Yahan apne channel IDs check kar lena
     channels_to_upload = [ch for ch in [BACKUP_1, BACKUP_2, PAID_CH] if ch != 0]
     
     for ch_id in channels_to_upload:
@@ -161,7 +182,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"Failed to upload to {ch_id}: {e}")
 
-    # 3. Immortal Link Generation (Web Redirector)
+    # 3. Immortal Link Generation
     web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
     
     # 4. Shorten Link via GPLinks
@@ -170,8 +191,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # 5. Post to Free Channel
     await status.edit_text("⏳ Posting to Free Channel...")
-    
-    # Style kiya hua caption
     caption = (
         f"🔞 <b>{title}</b>\n\n"
         f"🔥 <b>Watch Full Video & Download:</b>\n"
@@ -181,22 +200,20 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         if FREE_CH != 0:
-            await context.bot.send_video(chat_id=FREE_CH, video=trim_file_id, caption=caption, parse_mode='HTML')
+            # ✅ LOGIC: Agar video hai to video post karega, agar auto-thumbnail hai to photo post karega
+            if trim_type == 'photo':
+                await context.bot.send_photo(chat_id=FREE_CH, photo=trim_file_id, caption=caption, parse_mode='HTML')
+            else:
+                await context.bot.send_video(chat_id=FREE_CH, video=trim_file_id, caption=caption, parse_mode='HTML')
+            
             await status.edit_text(f"✅ **BAM! ALL DONE!**\n\n🎬 Title: {title}\n🔗 Short Link: {gplink}")
         else:
             await status.edit_text(f"✅ **Done!** (Free Channel ID .env me set nahi hai)\n🔗 Link: {gplink}")
     except Exception as e:
         await status.edit_text(f"❌ Error posting to free channel: {e}")
 
-    # Memory saaf karo taaki agle post ke liye ready rahe
     context.user_data.clear()
     return ConversationHandler.END
-
-async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🛑 Post Cancelled.")
-    context.user_data.clear()
-    return ConversationHandler.END
-
 
 # ================= PROVIDER BOT: GIVING THE VIDEO =================
 async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
