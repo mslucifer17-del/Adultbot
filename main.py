@@ -215,6 +215,12 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data.clear()
     return ConversationHandler.END
 
+async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process cancel karne ke liye"""
+    await update.message.reply_text("🛑 Post Cancelled.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
 # ================= PROVIDER BOT: GIVING THE VIDEO =================
 async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ye dusra bot hai jo user ko start karne par video dega"""
