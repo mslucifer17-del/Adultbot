@@ -144,31 +144,42 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     msg = update.message
     if not msg: return WAIT_FULL
 
-    # ✅ NAYA CHECK: Agar galti se text bhej diya
     if not msg.video and not msg.document:
         await msg.reply_text("❌ Error: Ye Full Video nahi lag rahi. Kripya Video File bhejein.")
         return WAIT_FULL
 
     status = await msg.reply_text("⏳ **Processing Started... (Koi aur command mat dena)**")
     
-    # ... BAAKI KA PURA CODE SAME RAHEGA ...
     title = context.user_data.get('title')
     if title == "🔥 Exclusive Premium Leak 🔥" and msg.caption:
         title = msg.caption
 
     full_file_id = msg.video.file_id if msg.video else msg.document.file_id
 
-    # ✅ NAYA FEATURE: Thumbnail Nikalna (Agar /skip kiya tha)
+    # ✅ NAYA FEATURE: Thumbnail Nikalna (Fixed for Telegram API restriction)
     trim_type = context.user_data.get('trim_type', 'video')
+    
     if context.user_data.get('trim_file') == 'use_thumbnail':
-        trim_type = 'photo' # Kyunki thumbnail ek photo hoti hai
+        trim_type = 'photo' 
+        thumb_obj = None
+        
         if msg.video and msg.video.thumbnail:
-            trim_file_id = msg.video.thumbnail.file_id
+            thumb_obj = msg.video.thumbnail
         elif msg.document and msg.document.thumbnail:
-            trim_file_id = msg.document.thumbnail.file_id
+            thumb_obj = msg.document.thumbnail
+            
+        if thumb_obj:
+            try:
+                # Telegram direct thumbnail id allow nahi karta, isliye memory me download karenge
+                await status.edit_text("⏳ Extracting Photo from Video...")
+                file_info = await context.bot.get_file(thumb_obj.file_id)
+                downloaded_bytes = await file_info.download_as_bytearray()
+                trim_file_id = bytes(downloaded_bytes) # Ab ye ek real photo ban chuki hai!
+            except Exception as e:
+                logger.error(f"Thumbnail extract error: {e}")
+                trim_file_id = "https://i.imgur.com/6XK4F6K.png" # Agar fail hua to default image
         else:
-            # Agar Telegram ne thumbnail nahi banaya (bohot rare hai), to ek default photo use karega
-            trim_file_id = "https://i.imgur.com/6XK4F6K.png" 
+            trim_file_id = "https://i.imgur.com/6XK4F6K.png" # Agar video me thumbnail nahi hai
     else:
         trim_file_id = context.user_data['trim_file']
 
@@ -209,7 +220,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         if FREE_CH != 0:
-            # ✅ LOGIC: Agar video hai to video post karega, agar auto-thumbnail hai to photo post karega
             if trim_type == 'photo':
                 await context.bot.send_photo(chat_id=FREE_CH, photo=trim_file_id, caption=caption, parse_mode='HTML')
             else:
@@ -221,12 +231,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         await status.edit_text(f"❌ Error posting to free channel: {e}")
 
-    context.user_data.clear()
-    return ConversationHandler.END
-
-async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process cancel karne ke liye"""
-    await update.message.reply_text("🛑 Post Cancelled.")
     context.user_data.clear()
     return ConversationHandler.END
 
