@@ -31,6 +31,8 @@ PAID_CH = int(os.environ.get("PAID_CHANNEL_ID", "0"))
 BACKUP_1 = int(os.environ.get("BACKUP_CHANNEL_1", "0"))
 BACKUP_2 = int(os.environ.get("BACKUP_CHANNEL_2", "0"))
 
+AUTO_DELETE_SECONDS = 300  # 5 minutes
+
 # STATES
 WAIT_TRIM, WAIT_FULL = range(2)
 
@@ -58,6 +60,120 @@ def setup_db():
 setup_db()
 
 
+# ================= AUTO DELETE SYSTEM =================
+async def auto_delete_message(message, delay=AUTO_DELETE_SECONDS):
+    """Koi bhi message ko X seconds baad silently delete kar deta hai"""
+    try:
+        await asyncio.sleep(delay)
+        await message.delete()
+    except Exception:
+        pass  # Agar already deleted hai ya permission nahi hai toh ignore
+
+
+async def send_and_auto_delete(bot, chat_id, text, delay=AUTO_DELETE_SECONDS, **kwargs):
+    """Text message bhejo aur auto-delete schedule karo"""
+    try:
+        msg = await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+        asyncio.create_task(auto_delete_message(msg, delay))
+        return msg
+    except Exception as e:
+        logger.error(f"Send & delete error: {e}")
+        return None
+
+
+async def send_video_and_auto_delete(bot, chat_id, video, caption, delay=AUTO_DELETE_SECONDS, **kwargs):
+    """Video bhejo with countdown warning, phir auto-delete"""
+    try:
+        # 1. Pehle video bhejo
+        vid_msg = await bot.send_video(
+            chat_id=chat_id, video=video, caption=caption, **kwargs
+        )
+
+        # 2. Warning message bhejo
+        minutes = delay // 60
+        warning_msg = await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"⚠️ <b>Auto-Delete Warning!</b>\n\n"
+                f"⏳ Ye video <b>{minutes} minute</b> baad automatically delete ho jayegi!\n"
+                f"💾 Jaldi se <b>Saved Messages</b> mein forward kar lo!\n\n"
+                f"🔒 <i>Ban protection ke liye ye zaroori hai.</i>"
+            ),
+            parse_mode='HTML'
+        )
+
+        # 3. 1 minute pehle final reminder
+        async def countdown_and_delete():
+            try:
+                # Wait until 1 minute before deletion
+                if delay > 60:
+                    await asyncio.sleep(delay - 60)
+                    reminder = await bot.send_message(
+                        chat_id=chat_id,
+                        text=(
+                            "🔴 <b>LAST WARNING!</b>\n\n"
+                            "⏳ <b>60 seconds</b> mein video delete ho jayegi!\n"
+                            "💾 Abhi forward karo Saved Messages mein!"
+                        ),
+                        parse_mode='HTML'
+                    )
+                    await asyncio.sleep(60)
+                    # Reminder delete
+                    try:
+                        await reminder.delete()
+                    except Exception:
+                        pass
+                else:
+                    await asyncio.sleep(delay)
+
+                # Video delete
+                try:
+                    await vid_msg.delete()
+                except Exception:
+                    pass
+
+                # Warning delete
+                try:
+                    await warning_msg.delete()
+                except Exception:
+                    pass
+
+                # Final "deleted" notification (ye bhi 30 sec baad delete hoga)
+                deleted_notice = await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "🗑️ <b>Video Deleted!</b>\n\n"
+                        "🔒 Ban protection ke liye video hata di gayi.\n"
+                        "🔄 Dubara dekhne ke liye link par click karo."
+                    ),
+                    parse_mode='HTML'
+                )
+                asyncio.create_task(auto_delete_message(deleted_notice, 30))
+
+            except Exception as e:
+                logger.error(f"Countdown delete error: {e}")
+
+        asyncio.create_task(countdown_and_delete())
+        return vid_msg
+
+    except Exception as e:
+        logger.error(f"Send video & delete error: {e}")
+        return None
+
+
+async def send_photo_and_auto_delete(bot, chat_id, photo, caption, delay=AUTO_DELETE_SECONDS, **kwargs):
+    """Photo bhejo aur auto-delete schedule karo"""
+    try:
+        photo_msg = await bot.send_photo(
+            chat_id=chat_id, photo=photo, caption=caption, **kwargs
+        )
+        asyncio.create_task(auto_delete_message(photo_msg, delay))
+        return photo_msg
+    except Exception as e:
+        logger.error(f"Send photo & delete error: {e}")
+        return None
+
+
 # ================= HELPER FUNCTIONS =================
 async def shorten_link(long_url):
     api_url = f"https://gplinks.in/api?api={GPLINKS_API_KEY}&url={long_url}"
@@ -73,7 +189,7 @@ async def shorten_link(long_url):
 
 
 async def download_telegram_file(bot, file_id):
-    """Telegram se file download karke BytesIO object return karta hai"""
+    """Telegram se file download karke BytesIO return karta hai"""
     try:
         file_obj = await bot.get_file(file_id)
         byte_array = await file_obj.download_as_bytearray()
@@ -149,7 +265,6 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg:
         return WAIT_TRIM
 
-    # /skip handling
     if msg.text:
         if msg.text.strip().lower() == '/skip':
             context.user_data['trim_file'] = 'use_thumbnail'
@@ -207,15 +322,13 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     trim_type = context.user_data.get('trim_type', 'video')
     trim_file = context.user_data.get('trim_file')
 
-    # ===== THUMBNAIL EXTRACTION (FIXED) =====
-    # Jab /skip kiya ho toh video ka thumbnail download karke fresh photo banao
-    thumbnail_bytes = None  # Ye store karega downloaded photo
+    # ===== THUMBNAIL EXTRACTION =====
+    thumbnail_bytes = None
 
     if trim_file == 'use_thumbnail':
         trim_type = 'photo'
         await status.edit_text("⏳ Extracting Thumbnail...")
 
-        # Pehle video ke thumbnail se try karo
         thumb_file_id = None
         if msg.video and msg.video.thumbnail:
             thumb_file_id = msg.video.thumbnail.file_id
@@ -225,16 +338,14 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         if thumb_file_id:
             thumbnail_bytes = await download_telegram_file(context.bot, thumb_file_id)
 
-        # Agar thumbnail nahi mila toh default image download karo
         if thumbnail_bytes is None:
             DEFAULT_THUMB_URL = "https://i.imgur.com/6XK4F6K.png"
             thumbnail_bytes = await download_url_to_bytes(DEFAULT_THUMB_URL)
 
-        # Agar wo bhi fail hua toh fallback: full video as video post karo
         if thumbnail_bytes is None:
-            logger.warning("Thumbnail extract failed completely, falling back to video post")
+            logger.warning("Thumbnail failed, falling back to video post")
             trim_type = 'video'
-            trim_file = full_file_id  # Full video hi trim ke jagah use karo
+            trim_file = full_file_id
 
     # ===== 1. DATABASE SAVE =====
     conn = db_pool.getconn()
@@ -280,8 +391,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         if FREE_CH != 0:
             if trim_type == 'photo' and thumbnail_bytes is not None:
-                # ✅ FIX: Fresh downloaded bytes ko InputFile wrap karke bhejo
-                thumbnail_bytes.seek(0)  # Reset pointer to start
+                thumbnail_bytes.seek(0)
                 await context.bot.send_photo(
                     chat_id=FREE_CH,
                     photo=InputFile(thumbnail_bytes, filename="preview.jpg"),
@@ -289,7 +399,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
                     parse_mode='HTML'
                 )
             else:
-                # Normal trim video ya fallback full video
                 await context.bot.send_video(
                     chat_id=FREE_CH,
                     video=trim_file,
@@ -314,9 +423,10 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
-# ================= PROVIDER BOT =================
+# ================= PROVIDER BOT (WITH AUTO-DELETE) =================
 async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    chat_id = update.effective_chat.id
     if not text:
         return
 
@@ -338,27 +448,46 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if result:
                 title, file_id = result
-                sent_msg = await update.message.reply_video(
+
+                # ✅ Auto-delete video with countdown warnings
+                await send_video_and_auto_delete(
+                    bot=context.bot,
+                    chat_id=chat_id,
                     video=file_id,
                     caption=(
-                        f"🎬 {title}\n\n"
-                        "⚠️ Forward to Saved Messages — it will be deleted!"
-                    )
+                        f"🎬 <b>{title}</b>\n\n"
+                        f"⏳ <b>Ye video {AUTO_DELETE_SECONDS // 60} min baad auto-delete ho jayegi!</b>\n"
+                        f"💾 Jaldi forward karo Saved Messages mein!\n\n"
+                        f"🔒 <i>Ban protection active hai</i>"
+                    ),
+                    delay=AUTO_DELETE_SECONDS,
+                    parse_mode='HTML'
                 )
-                await asyncio.sleep(300)
-                try:
-                    await sent_msg.delete()
-                except Exception:
-                    pass
+
+                # User ka /start message bhi delete karo (clean chat)
+                asyncio.create_task(auto_delete_message(update.message, 5))
+
             else:
-                await update.message.reply_text("❌ Video not found or deleted.")
+                no_vid = await update.message.reply_text("❌ Video not found or deleted.")
+                asyncio.create_task(auto_delete_message(no_vid, 30))
+                asyncio.create_task(auto_delete_message(update.message, 5))
+
         except ValueError:
-            await update.message.reply_text("❌ Invalid video ID.")
+            err = await update.message.reply_text("❌ Invalid video ID.")
+            asyncio.create_task(auto_delete_message(err, 30))
         except Exception as e:
             logger.error(f"Provider Bot Error: {e}")
-            await update.message.reply_text("❌ Something went wrong.")
+            err = await update.message.reply_text("❌ Something went wrong.")
+            asyncio.create_task(auto_delete_message(err, 30))
     else:
-        await update.message.reply_text("🔞 Welcome! Please use a valid video link.")
+        welcome = await update.message.reply_text(
+            "🔞 <b>Welcome!</b>\n\n"
+            "📎 Please use a valid video link to watch.\n"
+            "🔒 All messages auto-delete for safety.",
+            parse_mode='HTML'
+        )
+        asyncio.create_task(auto_delete_message(welcome, 60))
+        asyncio.create_task(auto_delete_message(update.message, 5))
 
 
 # ================= RUN BOTH BOTS =================
