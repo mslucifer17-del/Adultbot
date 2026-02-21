@@ -86,36 +86,59 @@ def run_flask():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
 
-# ================= MAIN BOT: UPLOAD FLOW =================
-async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID: return
-    await update.message.reply_text("🎬 **New Post Start!**\n\nSabse pehle Video ka **TITLE** bhejo:", parse_mode='Markdown')
-    return WAIT_TITLE
+# STATES FOR UPLOAD FLOW
+WAIT_TRIM, WAIT_FULL = range(2)
 
-async def get_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['title'] = update.message.text
-    await update.message.reply_text("✂️ **Title Saved!**\n\nAb choti si **TRIMMED VIDEO (Preview)** bhejo ya forward karo:")
+# ================= MAIN BOT: UPLOAD FLOW (SUPER FAST) =================
+async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 1: Admin /post command deta hai"""
+    if update.effective_user.id != ADMIN_USER_ID: return
+    
+    await update.message.reply_text(
+        "⚡ **Super-Fast Post Mode!**\n\n"
+        "✂️ Sabse pehle choti **TRIMMED VIDEO (Preview)** bhejo ya forward karo.\n\n"
+        "*(Tip: Agar aap trim video ke caption mein naam likhoge, toh main usko Title bana lunga!)*", 
+        parse_mode='Markdown'
+    )
     return WAIT_TRIM
 
 async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.video and not update.message.document and not update.message.animation:
-        await update.message.reply_text("❌ Error: Video bhejo bhai.")
+    """Step 2: Admin Trim video bhejta hai"""
+    msg = update.message
+    if not msg.video and not msg.document and not msg.animation:
+        await msg.reply_text("❌ Error: Ye video nahi hai. Kripya Trimmed Video bhejo.")
         return WAIT_TRIM
     
-    context.user_data['trim_file'] = update.message.video.file_id if update.message.video else (update.message.animation.file_id if update.message.animation else update.message.document.file_id)
-    await update.message.reply_text("✅ **Trim Video Saved!**\n\n🔞 Ab **FULL HD VIDEO** bhejo. Jiske baad main apna jaadu karunga.")
+    # Title ko caption se nikalna (Agar caption nahi hai, to default naam lagayega)
+    context.user_data['title'] = msg.caption if msg.caption else "🔥 Exclusive Premium Leak 🔥"
+    
+    # File ID save karna
+    context.user_data['trim_file'] = msg.video.file_id if msg.video else (msg.animation.file_id if msg.animation else msg.document.file_id)
+    
+    await msg.reply_text(
+        "✅ **Trim Video Saved!**\n\n"
+        "🔞 Ab **FULL HD VIDEO** bhejo.\n"
+        "*(Jaise hi aap full video bhejoge, main auto-process karke channel par daal dunga!)*",
+        parse_mode='Markdown'
+    )
     return WAIT_FULL
 
 async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.video and not update.message.document:
-        await update.message.reply_text("❌ Error: Full Video bhejo.")
+    """Step 3: Admin Full video bhejta hai aur Bot sab auto-process kar deta hai"""
+    msg = update.message
+    if not msg.video and not msg.document:
+        await msg.reply_text("❌ Error: Full Video bhejo.")
         return WAIT_FULL
 
-    status = await update.message.reply_text("⏳ **Processing Started...**")
+    status = await msg.reply_text("⏳ **Processing Started... (Koi aur command mat dena)**")
     
-    title = context.user_data['title']
+    # Agar Trim me caption nahi tha, par Full video me hai, to usko Title bana lo
+    title = context.user_data.get('title')
+    if title == "🔥 Exclusive Premium Leak 🔥" and msg.caption:
+        title = msg.caption
+
     trim_file_id = context.user_data['trim_file']
-    full_file_id = update.message.video.file_id if update.message.video else update.message.document.file_id
+    full_file_id = msg.video.file_id if msg.video else msg.document.file_id
 
     # 1. Database me Full Video Save karo
     conn = db_pool.getconn()
@@ -126,16 +149,19 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     cur.close()
     db_pool.putconn(conn)
 
-    # 2. Upload to 2 Backup Channels & 1 Paid Channel
+    # 2. Upload to Backups & Paid Channel
     await status.edit_text("⏳ Uploading Full Video to Backups & Paid Channel...")
-    for ch_id in [BACKUP_1, BACKUP_2, PAID_CH]:
+    
+    # Yahan apne channel IDs check kar lena
+    channels_to_upload = [ch for ch in [BACKUP_1, BACKUP_2, PAID_CH] if ch != 0]
+    
+    for ch_id in channels_to_upload:
         try:
             await context.bot.send_video(chat_id=ch_id, video=full_file_id, caption=f"🔒 {title}")
         except Exception as e:
             logger.error(f"Failed to upload to {ch_id}: {e}")
 
-    # 3. Immortal Link Generation!
-    # Direct telegram link nahi banayenge, apne web server ka link banayenge
+    # 3. Immortal Link Generation (Web Redirector)
     web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
     
     # 4. Shorten Link via GPLinks
@@ -144,6 +170,8 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # 5. Post to Free Channel
     await status.edit_text("⏳ Posting to Free Channel...")
+    
+    # Style kiya hua caption
     caption = (
         f"🔞 <b>{title}</b>\n\n"
         f"🔥 <b>Watch Full Video & Download:</b>\n"
@@ -152,16 +180,20 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
     try:
-        await context.bot.send_video(chat_id=FREE_CH, video=trim_file_id, caption=caption, parse_mode='HTML')
-        await status.edit_text(f"✅ **BAM! ALL DONE!**\n\n- Backups Done\n- Paid Channel Done\n- Free Channel Posted with GPLink\n\n🔗 Short Link: {gplink}")
+        if FREE_CH != 0:
+            await context.bot.send_video(chat_id=FREE_CH, video=trim_file_id, caption=caption, parse_mode='HTML')
+            await status.edit_text(f"✅ **BAM! ALL DONE!**\n\n🎬 Title: {title}\n🔗 Short Link: {gplink}")
+        else:
+            await status.edit_text(f"✅ **Done!** (Free Channel ID .env me set nahi hai)\n🔗 Link: {gplink}")
     except Exception as e:
         await status.edit_text(f"❌ Error posting to free channel: {e}")
 
+    # Memory saaf karo taaki agle post ke liye ready rahe
     context.user_data.clear()
     return ConversationHandler.END
 
 async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🛑 Cancelled.")
+    await update.message.reply_text("🛑 Post Cancelled.")
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -208,7 +240,6 @@ async def run_bots():
     upload_conv = ConversationHandler(
         entry_points=[CommandHandler('post', start_upload)],
         states={
-            WAIT_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_title)],
             WAIT_TRIM: [MessageHandler(filters.VIDEO | filters.Document.ALL | filters.ANIMATION, get_trim)],
             WAIT_FULL: [MessageHandler(filters.VIDEO | filters.Document.ALL, get_full_and_process)]
         },
