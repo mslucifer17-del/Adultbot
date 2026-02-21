@@ -105,16 +105,21 @@ async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Step 2: Admin Trim video bhejta hai YA /skip karta hai"""
     msg = update.message
+    if not msg: return WAIT_TRIM
     
-    # ✅ NAYA FEATURE: Agar user ke paas trim nahi hai
-    if msg.text and msg.text.strip().lower() == '/skip':
-        context.user_data['trim_file'] = 'use_thumbnail' # Bot ko ishara de diya
-        context.user_data['title'] = "🔥 Exclusive Premium Leak 🔥" # Default title
-        await msg.reply_text(
-            "⏭️ **Trim Skipped!**\n\n"
-            "🔞 Ab seedha **FULL HD VIDEO** bhejo. Main uska auto-thumbnail nikal kar Free Channel par post kar dunga!"
-        )
-        return WAIT_FULL
+    # ✅ NAYA: Agar text message aaya hai (Jaise /skip)
+    if msg.text:
+        if msg.text.strip().lower() == '/skip':
+            context.user_data['trim_file'] = 'use_thumbnail' # Bot ko ishara de diya
+            context.user_data['title'] = "🔥 Exclusive Premium Leak 🔥" # Default title
+            await msg.reply_text(
+                "⏭️ **Trim Skipped!**\n\n"
+                "🔞 Ab seedha **FULL HD VIDEO** bhejo. Main uska auto-thumbnail nikal kar Free Channel par post kar dunga!"
+            )
+            return WAIT_FULL
+        else:
+            await msg.reply_text("❌ Kripya Trimmed Video bhejo ya /skip likho.")
+            return WAIT_TRIM
 
     # Agar normal trim video aati hai:
     if not msg.video and not msg.document and not msg.animation:
@@ -137,12 +142,16 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Step 3: Admin Full video bhejta hai aur Bot sab auto-process kar deta hai"""
     msg = update.message
+    if not msg: return WAIT_FULL
+
+    # ✅ NAYA CHECK: Agar galti se text bhej diya
     if not msg.video and not msg.document:
-        await msg.reply_text("❌ Error: Full Video bhejo.")
+        await msg.reply_text("❌ Error: Ye Full Video nahi lag rahi. Kripya Video File bhejein.")
         return WAIT_FULL
 
     status = await msg.reply_text("⏳ **Processing Started... (Koi aur command mat dena)**")
     
+    # ... BAAKI KA PURA CODE SAME RAHEGA ...
     title = context.user_data.get('title')
     if title == "🔥 Exclusive Premium Leak 🔥" and msg.caption:
         title = msg.caption
@@ -263,8 +272,9 @@ async def run_bots():
     upload_conv = ConversationHandler(
         entry_points=[CommandHandler('post', start_upload)],
         states={
-            WAIT_TRIM: [MessageHandler(filters.VIDEO | filters.Document.ALL | filters.ANIMATION, get_trim)],
-            WAIT_FULL: [MessageHandler(filters.VIDEO | filters.Document.ALL, get_full_and_process)]
+            # 👇 Yahan filters.ALL kar diya hai taaki ye /skip ko bhi sun sake
+            WAIT_TRIM: [MessageHandler(filters.ALL, get_trim)],
+            WAIT_FULL: [MessageHandler(filters.ALL, get_full_and_process)]
         },
         fallbacks=[CommandHandler('cancel', cancel_flow)]
     )
