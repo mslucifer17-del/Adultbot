@@ -1,6 +1,5 @@
 import os
 import io
-import re
 import json
 import asyncio
 import logging
@@ -32,7 +31,7 @@ PAID_CH = int(os.environ.get("PAID_CHANNEL_ID", "0"))
 BACKUP_1 = int(os.environ.get("BACKUP_CHANNEL_1", "0"))
 BACKUP_2 = int(os.environ.get("BACKUP_CHANNEL_2", "0"))
 
-# STATES — ek hi jagah define karo, duplicate hataya
+# STATES
 WAIT_TRIM, WAIT_FULL = range(2)
 
 # ================= DATABASE SETUP =================
@@ -73,6 +72,36 @@ async def shorten_link(long_url):
     return long_url
 
 
+async def download_telegram_file(bot, file_id):
+    """Telegram se file download karke BytesIO object return karta hai"""
+    try:
+        file_obj = await bot.get_file(file_id)
+        byte_array = await file_obj.download_as_bytearray()
+        buffer = io.BytesIO(bytes(byte_array))
+        buffer.name = "thumbnail.jpg"
+        buffer.seek(0)
+        return buffer
+    except Exception as e:
+        logger.error(f"File download error: {e}")
+        return None
+
+
+async def download_url_to_bytes(url):
+    """URL se image download karke BytesIO return karta hai"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    buffer = io.BytesIO(data)
+                    buffer.name = "default_thumb.jpg"
+                    buffer.seek(0)
+                    return buffer
+    except Exception as e:
+        logger.error(f"URL download error: {e}")
+    return None
+
+
 # ================= WEB REDIRECTOR (FLASK) =================
 app = Flask(__name__)
 
@@ -93,45 +122,42 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 
-# ================= MAIN BOT: UPLOAD FLOW =================
+# ================= MAIN BOT: CONVERSATION HANDLERS =================
 
 async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel command — conversation khatam karo"""
     context.user_data.clear()
     await update.message.reply_text("❌ **Upload cancelled.**", parse_mode='Markdown')
     return ConversationHandler.END
 
 
 async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Step 1: Admin /post command deta hai"""
     if update.effective_user.id != ADMIN_USER_ID:
         return ConversationHandler.END
 
     await update.message.reply_text(
         "⚡ **Super-Fast Post Mode!**\n\n"
         "✂️ Sabse pehle choti **TRIMMED VIDEO (Preview)** bhejo.\n\n"
-        "*(Agar trim video nahi hai, toh /skip likh kar bhej do, "
-        "main Full video ka Thumbnail use kar lunga!)*",
+        "*(Agar trim video nahi hai, toh /skip likh do — "
+        "main Full video ka Thumbnail use karunga!)*",
         parse_mode='Markdown'
     )
     return WAIT_TRIM
 
 
 async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Step 2: Admin Trim video bhejta hai YA /skip karta hai"""
     msg = update.message
     if not msg:
         return WAIT_TRIM
 
-    # Agar text message aaya hai (jaise /skip)
+    # /skip handling
     if msg.text:
         if msg.text.strip().lower() == '/skip':
             context.user_data['trim_file'] = 'use_thumbnail'
+            context.user_data['trim_type'] = 'photo'
             context.user_data['title'] = "🔥 Exclusive Premium Leak 🔥"
             await msg.reply_text(
                 "⏭️ **Trim Skipped!**\n\n"
-                "🔞 Ab seedha **FULL HD VIDEO** bhejo. "
-                "Main uska auto-thumbnail nikal kar Free Channel par post kar dunga!",
+                "🔞 Ab seedha **FULL HD VIDEO** bhejo.",
                 parse_mode='Markdown'
             )
             return WAIT_FULL
@@ -139,12 +165,10 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text("❌ Kripya Trimmed Video bhejo ya /skip likho.")
             return WAIT_TRIM
 
-    # Agar video/document/animation hai
     if not msg.video and not msg.document and not msg.animation:
         await msg.reply_text("❌ Ye video nahi hai. Kripya Trimmed Video bhejo ya /skip likho.")
         return WAIT_TRIM
 
-    # Title aur File save karna
     context.user_data['title'] = msg.caption if msg.caption else "🔥 Exclusive Premium Leak 🔥"
 
     if msg.video:
@@ -158,15 +182,13 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await msg.reply_text(
         "✅ **Trim Video Saved!**\n\n"
-        "🔞 Ab **FULL HD VIDEO** bhejo.\n"
-        "*(Jaise hi full video bhejoge, auto-process karke channel par daal dunga!)*",
+        "🔞 Ab **FULL HD VIDEO** bhejo.",
         parse_mode='Markdown'
     )
     return WAIT_FULL
 
 
 async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Step 3: Admin Full video bhejta hai aur Bot sab auto-process kar deta hai"""
     msg = update.message
     if not msg:
         return WAIT_FULL
@@ -175,44 +197,46 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         await msg.reply_text("❌ Ye Full Video nahi lag rahi. Kripya Video File bhejein.")
         return WAIT_FULL
 
-    status = await msg.reply_text("⏳ **Processing Started... (Koi aur command mat dena)**",
-                                  parse_mode='Markdown')
+    status = await msg.reply_text("⏳ **Processing...**", parse_mode='Markdown')
 
     title = context.user_data.get('title', "🔥 Exclusive Premium Leak 🔥")
     if title == "🔥 Exclusive Premium Leak 🔥" and msg.caption:
         title = msg.caption
 
     full_file_id = msg.video.file_id if msg.video else msg.document.file_id
-
-    # ---------- Thumbnail / Trim Logic ----------
     trim_type = context.user_data.get('trim_type', 'video')
-    trim_file_id = context.user_data.get('trim_file')
+    trim_file = context.user_data.get('trim_file')
 
-    # Agar /skip kiya tha toh thumbnail extract karo
-    if trim_file_id == 'use_thumbnail':
+    # ===== THUMBNAIL EXTRACTION (FIXED) =====
+    # Jab /skip kiya ho toh video ka thumbnail download karke fresh photo banao
+    thumbnail_bytes = None  # Ye store karega downloaded photo
+
+    if trim_file == 'use_thumbnail':
         trim_type = 'photo'
-        thumb_obj = None
+        await status.edit_text("⏳ Extracting Thumbnail...")
 
+        # Pehle video ke thumbnail se try karo
+        thumb_file_id = None
         if msg.video and msg.video.thumbnail:
-            thumb_obj = msg.video.thumbnail
+            thumb_file_id = msg.video.thumbnail.file_id
         elif msg.document and msg.document.thumbnail:
-            thumb_obj = msg.document.thumbnail
+            thumb_file_id = msg.document.thumbnail.file_id
 
-        if thumb_obj:
-            try:
-                await status.edit_text("⏳ Extracting Thumbnail from Video...")
-                file_info = await context.bot.get_file(thumb_obj.file_id)
-                downloaded_bytes = await file_info.download_as_bytearray()
-                # BytesIO + InputFile wrap karo — Telegram ko raw bytes nahi de sakte
-                trim_file_id = InputFile(io.BytesIO(bytes(downloaded_bytes)),
-                                         filename="thumbnail.jpg")
-            except Exception as e:
-                logger.error(f"Thumbnail extract error: {e}")
-                trim_file_id = "https://i.imgur.com/6XK4F6K.png"
-        else:
-            trim_file_id = "https://i.imgur.com/6XK4F6K.png"
+        if thumb_file_id:
+            thumbnail_bytes = await download_telegram_file(context.bot, thumb_file_id)
 
-    # ---------- 1. Database me Full Video Save karo ----------
+        # Agar thumbnail nahi mila toh default image download karo
+        if thumbnail_bytes is None:
+            DEFAULT_THUMB_URL = "https://i.imgur.com/6XK4F6K.png"
+            thumbnail_bytes = await download_url_to_bytes(DEFAULT_THUMB_URL)
+
+        # Agar wo bhi fail hua toh fallback: full video as video post karo
+        if thumbnail_bytes is None:
+            logger.warning("Thumbnail extract failed completely, falling back to video post")
+            trim_type = 'video'
+            trim_file = full_file_id  # Full video hi trim ke jagah use karo
+
+    # ===== 1. DATABASE SAVE =====
     conn = db_pool.getconn()
     try:
         cur = conn.cursor()
@@ -226,25 +250,25 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     finally:
         db_pool.putconn(conn)
 
-    # ---------- 2. Upload to Backups & Paid Channel ----------
-    await status.edit_text("⏳ Uploading Full Video to Backups & Paid Channel...")
+    # ===== 2. UPLOAD TO BACKUPS & PAID CHANNEL =====
+    await status.edit_text("⏳ Uploading to Backups & Paid Channel...")
     channels_to_upload = [ch for ch in [BACKUP_1, BACKUP_2, PAID_CH] if ch != 0]
 
     for ch_id in channels_to_upload:
         try:
-            await context.bot.send_video(chat_id=ch_id, video=full_file_id,
-                                         caption=f"🔒 {title}")
+            await context.bot.send_video(
+                chat_id=ch_id, video=full_file_id, caption=f"🔒 {title}"
+            )
         except Exception as e:
             logger.error(f"Failed to upload to {ch_id}: {e}")
 
-    # ---------- 3. Immortal Link Generation ----------
+    # ===== 3. LINK GENERATION =====
     web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
 
-    # ---------- 4. Shorten Link via GPLinks ----------
     await status.edit_text("⏳ Generating GPLinks...")
     gplink = await shorten_link(web_link)
 
-    # ---------- 5. Post to Free Channel ----------
+    # ===== 4. POST TO FREE CHANNEL =====
     await status.edit_text("⏳ Posting to Free Channel...")
     caption = (
         f"🔞 <b>{title}</b>\n\n"
@@ -255,18 +279,26 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
 
     try:
         if FREE_CH != 0:
-            if trim_type == 'photo':
+            if trim_type == 'photo' and thumbnail_bytes is not None:
+                # ✅ FIX: Fresh downloaded bytes ko InputFile wrap karke bhejo
+                thumbnail_bytes.seek(0)  # Reset pointer to start
                 await context.bot.send_photo(
-                    chat_id=FREE_CH, photo=trim_file_id,
-                    caption=caption, parse_mode='HTML'
+                    chat_id=FREE_CH,
+                    photo=InputFile(thumbnail_bytes, filename="preview.jpg"),
+                    caption=caption,
+                    parse_mode='HTML'
                 )
             else:
+                # Normal trim video ya fallback full video
                 await context.bot.send_video(
-                    chat_id=FREE_CH, video=trim_file_id,
-                    caption=caption, parse_mode='HTML'
+                    chat_id=FREE_CH,
+                    video=trim_file,
+                    caption=caption,
+                    parse_mode='HTML'
                 )
+
             await status.edit_text(
-                f"✅ **BAM! ALL DONE!**\n\n🎬 Title: {title}\n🔗 Short Link: {gplink}",
+                f"✅ **ALL DONE!**\n\n🎬 Title: {title}\n🔗 Link: {gplink}",
                 parse_mode='Markdown'
             )
         else:
@@ -275,15 +307,15 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode='Markdown'
             )
     except Exception as e:
+        logger.error(f"Free channel post error: {e}")
         await status.edit_text(f"❌ Error posting to free channel: {e}")
 
     context.user_data.clear()
     return ConversationHandler.END
 
 
-# ================= PROVIDER BOT: GIVING THE VIDEO =================
+# ================= PROVIDER BOT =================
 async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ye dusra bot hai jo user ko start karne par video dega"""
     text = update.message.text
     if not text:
         return
@@ -308,9 +340,11 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 title, file_id = result
                 sent_msg = await update.message.reply_video(
                     video=file_id,
-                    caption=f"🎬 {title}\n\n⚠️ Forward to Saved Messages — it will be deleted!"
+                    caption=(
+                        f"🎬 {title}\n\n"
+                        "⚠️ Forward to Saved Messages — it will be deleted!"
+                    )
                 )
-                # Auto delete after 5 minutes
                 await asyncio.sleep(300)
                 try:
                     await sent_msg.delete()
@@ -327,9 +361,9 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔞 Welcome! Please use a valid video link.")
 
 
-# ================= RUN MULTIPLE BOTS =================
+# ================= RUN BOTH BOTS =================
 async def run_bots():
-    # 1. Main Admin Bot
+    # Main Admin Bot
     main_app = Application.builder().token(MAIN_BOT_TOKEN).build()
 
     upload_conv = ConversationHandler(
@@ -343,18 +377,20 @@ async def run_bots():
                 )
             ],
             WAIT_FULL: [
-                MessageHandler(filters.VIDEO | filters.Document.ALL, get_full_and_process)
+                MessageHandler(
+                    filters.VIDEO | filters.Document.ALL,
+                    get_full_and_process
+                )
             ]
         },
         fallbacks=[CommandHandler('cancel', cancel_flow)]
     )
     main_app.add_handler(upload_conv)
 
-    # 2. Provider Bot (Client Facing)
+    # Provider Bot
     provider_app = Application.builder().token(PROVIDER_BOT_TOKEN).build()
     provider_app.add_handler(CommandHandler('start', provider_start))
 
-    # Initialize and Start Both
     await main_app.initialize()
     await main_app.start()
     await main_app.updater.start_polling()
@@ -365,7 +401,6 @@ async def run_bots():
 
     logger.info("✅ Both Telegram Bots Started Successfully!")
 
-    # Keep alive
     stop_signal = asyncio.Event()
     await stop_signal.wait()
 
