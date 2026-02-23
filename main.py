@@ -5,6 +5,7 @@ import asyncio
 import logging
 import aiohttp
 import psycopg2
+from html import escape as html_escape  # ✅ NEW IMPORT
 from psycopg2 import pool
 from flask import Flask, redirect
 from threading import Thread
@@ -35,20 +36,15 @@ PAID_CH = int(os.environ.get("PAID_CHANNEL_ID", "0"))
 BACKUP_1 = int(os.environ.get("BACKUP_CHANNEL_1", "0"))
 BACKUP_2 = int(os.environ.get("BACKUP_CHANNEL_2", "0"))
 
-# ⏱️ AUTO DELETE TIME (in seconds)
 AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "300"))
 
-# STATES FOR UPLOAD FLOW
 WAIT_TRIM, WAIT_FULL = range(2)
-
-# STATES FOR BULK UPLOAD
 BULK_WAIT_VIDEO, BULK_CONFIRM = range(2)
 
 # ================= DATABASE SETUP =================
 db_pool = None
 
 def init_db_pool():
-    """Initialize database connection pool"""
     global db_pool
     try:
         db_pool = pool.SimpleConnectionPool(1, 20, dsn=DATABASE_URL)
@@ -58,7 +54,6 @@ def init_db_pool():
         raise
 
 def setup_db():
-    """Create tables if not exist and update schema with backup_msg_id"""
     conn = None
     try:
         conn = db_pool.getconn()
@@ -72,7 +67,6 @@ def setup_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Agar purani table bani hui hai toh usme column add karne ki koshish
         try:
             cur.execute("ALTER TABLE adult_videos ADD COLUMN backup_msg_id INTEGER;")
         except Exception:
@@ -90,9 +84,8 @@ def setup_db():
 # ================= HELPER FUNCTIONS =================
 
 def clean_title(raw_title):
-    """Clean the title by removing unwanted text"""
     if not raw_title:
-        return "🔥 Exclusive Premium Content 🔥"
+        return "Exclusive Premium Content"
     
     title = raw_title.strip()
     title = re.sub(r'@\w+', '', title)
@@ -112,18 +105,44 @@ def clean_title(raw_title):
     title = title.strip()
     
     if len(title) < 5:
-        return "🔥 Exclusive Premium Content 🔥"
+        return "Exclusive Premium Content"
     
-    return f"🔞 {title}"
+    return title
 
 def generate_display_title(cleaned_title):
-    """Generate a shorter display title for status messages"""
     if len(cleaned_title) > 50:
         return cleaned_title[:47] + "..."
     return cleaned_title
 
+# ✅ NEW: Build safe HTML caption (escapes all dynamic content)
+def build_free_channel_caption(title, gplink):
+    safe_title = html_escape(title)
+    safe_gplink = html_escape(gplink)
+    return (
+        f"🔞 <b>{safe_title}</b>\n\n"
+        f"🔥 <b>Watch Full Video &amp; Download:</b>\n"
+        f"👉 {safe_gplink}\n\n"
+        f"💎 <b>Join VIP for Direct Files:</b> https://t.me/YOUR_VIP_LINK"
+    )
+
+# ✅ NEW: Build safe HTML caption for backup/paid channels
+def build_backup_caption(title):
+    safe_title = html_escape(title)
+    return f"🔒 {safe_title}"
+
+# ✅ NEW: Build safe Markdown caption for provider bot
+def build_provider_caption(title):
+    # Escape Markdown special characters: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    safe_title = title.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace(']', '\\]')
+    safe_title = safe_title.replace('(', '\\(').replace(')', '\\)').replace('~', '\\~').replace('`', '\\`')
+    return (
+        f"🎬 *{safe_title}*\n\n"
+        f"⏱️ *Auto\\-Delete:* 5 minutes\n"
+        f"💾 *Forward to Saved Messages ASAP\\!*\n\n"
+        f"⚠️ _Yeh file automatically delete ho jayegi\\._"
+    )
+
 async def shorten_link(long_url):
-    """Shorten URL using GPLinks API"""
     if not GPLINKS_API_KEY:
         logger.warning("GPLINKS_API_KEY not set, returning original URL")
         return long_url
@@ -140,14 +159,11 @@ async def shorten_link(long_url):
     return long_url
 
 def get_db_connection():
-    """Get database connection from pool"""
     if db_pool is None:
         raise Exception("Database pool not initialized")
     return db_pool.getconn()
 
-# ✅ FIXED: Auto-delete now uses message_id directly (copy_message compatible)
 async def auto_delete_with_notification(context, chat_id, message_id_to_delete, delete_time=AUTO_DELETE_TIME):
-    """Auto-delete video using message_id after specified time"""
     try:
         wait_time = max(delete_time - 30, 60)
         await asyncio.sleep(wait_time)
@@ -156,12 +172,11 @@ async def auto_delete_with_notification(context, chat_id, message_id_to_delete, 
             warning_msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    "⚠️ **IMPORTANT NOTICE**\n\n"
-                    "🕒 Yeh video **30 seconds** mein auto-delete ho jayegi!\n\n"
-                    "💾 **Jaldi se Saved Messages mein forward kar lo!**\n\n"
-                    "🔒 _Yeh copyright protection ke liye hai._"
-                ),
-                parse_mode='Markdown'
+                    "⚠️ IMPORTANT NOTICE\n\n"
+                    "🕒 Yeh video 30 seconds mein auto-delete ho jayegi!\n\n"
+                    "💾 Jaldi se Saved Messages mein forward kar lo!\n\n"
+                    "🔒 Yeh copyright protection ke liye hai."
+                )
             )
             await asyncio.sleep(5)
             await warning_msg.delete()
@@ -171,7 +186,6 @@ async def auto_delete_with_notification(context, chat_id, message_id_to_delete, 
         await asyncio.sleep(30)
         
         try:
-            # ✅ Delete message directly via bot API using message_id
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id_to_delete)
             logger.info(f"✅ Video message deleted for chat: {chat_id}")
         except Exception as e:
@@ -181,11 +195,10 @@ async def auto_delete_with_notification(context, chat_id, message_id_to_delete, 
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    "🗑️ **Video Auto-Deleted!**\n\n"
+                    "🗑️ Video Auto-Deleted!\n\n"
                     "✅ Agar aapne forward kar liya hai toh saved messages mein check karein.\n"
                     "❌ Nahi kiya toh dobara link se access karein."
-                ),
-                parse_mode='Markdown'
+                )
             )
         except Exception as e:
             logger.error(f"Final notice error: {e}")
@@ -211,21 +224,18 @@ def run_flask():
 
 # ================= MAIN BOT: SINGLE UPLOAD FLOW =================
 async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Step 1: Admin /post command deta hai"""
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ Access Denied! Only admin can use this command.")
         return ConversationHandler.END
     
     await update.message.reply_text(
-        "⚡ **Single Post Mode!**\n\n"
-        "✂️ Sabse pehle choti **TRIMMED VIDEO (Preview)** bhejo.\n\n"
-        "*(Agar aapke paas trim video nahi hai, toh bas `/skip` likh kar bhej do!)*", 
-        parse_mode='Markdown'
+        "⚡ Single Post Mode!\n\n"
+        "✂️ Sabse pehle choti TRIMMED VIDEO (Preview) bhejo.\n\n"
+        "Agar aapke paas trim video nahi hai, toh bas /skip likh kar bhej do!"
     )
     return WAIT_TRIM
 
 async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Step 2: Admin Trim video bhejta hai YA /skip karta hai"""
     msg = update.message
     if not msg:
         return WAIT_TRIM
@@ -235,16 +245,16 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['trim_file'] = 'use_thumbnail'
             context.user_data['trim_type'] = 'photo'
             await msg.reply_text(
-                "⏭️ **Trim Skipped!**\n\n"
-                "🔞 Ab seedha **FULL HD VIDEO** bhejo. Main uska auto-thumbnail nikal kar Free Channel par post kar dunga!"
+                "⏭️ Trim Skipped!\n\n"
+                "🔞 Ab seedha FULL HD VIDEO bhejo."
             )
             return WAIT_FULL
         else:
-            await msg.reply_text("❌ Kripya Trimmed Video bhejo ya `/skip` likho.")
+            await msg.reply_text("❌ Kripya Trimmed Video bhejo ya /skip likho.")
             return WAIT_TRIM
 
     if not msg.video and not msg.document and not msg.animation:
-        await msg.reply_text("❌ Error: Ye video nahi hai. Kripya Trimmed Video bhejo ya `/skip` likho.")
+        await msg.reply_text("❌ Error: Ye video nahi hai. Kripya Trimmed Video bhejo ya /skip likho.")
         return WAIT_TRIM
     
     raw_caption = msg.caption if msg.caption else ""
@@ -262,20 +272,17 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['trim_file'] = msg.document.file_id
         context.user_data['trim_type'] = 'document'
     
-    # ✅ Save trim message info for copy_message to Free Channel
     context.user_data['trim_chat_id'] = msg.chat_id
     context.user_data['trim_msg_id'] = msg.message_id
     
     await msg.reply_text(
-        f"✅ **Trim Video Saved!**\n\n"
-        f"📝 Title: `{cleaned_title}`\n\n"
-        "🔞 Ab **FULL HD VIDEO** bhejo.",
-        parse_mode='Markdown'
+        f"✅ Trim Video Saved!\n\n"
+        f"📝 Title: {cleaned_title}\n\n"
+        "🔞 Ab FULL HD VIDEO bhejo."
     )
     return WAIT_FULL
 
 async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Step 3: Admin Full video bhejta hai aur Bot sab auto-process kar deta hai"""
     msg = update.message
     if not msg:
         return WAIT_FULL
@@ -284,10 +291,10 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         await msg.reply_text("❌ Error: Ye Full Video nahi lag rahi. Kripya Video File bhejein.")
         return WAIT_FULL
 
-    status = await msg.reply_text("⏳ **Processing Started...**")
+    status = await msg.reply_text("⏳ Processing Started...")
     
     title = context.user_data.get('title', '')
-    if not title or title == "🔞 ":
+    if not title:
         raw_caption = msg.caption if msg.caption else ""
         title = clean_title(raw_caption)
         context.user_data['title'] = title
@@ -319,16 +326,18 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
             trim_file_id = "https://i.imgur.com/6XK4F6K.png"
             trim_type = 'photo_url'
 
-    # ✅ STEP 1: Pehle BACKUP_1 par copy_message se upload (thumbnail 100% preserved!)
+    # ✅ STEP 1: BACKUP_1 par copy_message se upload (thumbnail preserved)
     await status.edit_text("⏳ Uploading to Backup Channel...")
     backup_msg_id = None
+    backup_caption = build_backup_caption(title)
+    
     if BACKUP_1 != 0:
         try:
             copied_msg = await context.bot.copy_message(
                 chat_id=BACKUP_1,
                 from_chat_id=msg.chat_id,
                 message_id=msg.message_id,
-                caption=f"🔒 {title}",
+                caption=backup_caption,
                 parse_mode='HTML'
             )
             backup_msg_id = copied_msg.message_id
@@ -336,7 +345,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"❌ Failed to copy to Backup 1: {e}")
 
-    # ✅ STEP 2: Database mein save karo (with backup_msg_id)
+    # ✅ STEP 2: Database mein save karo
     conn = None
     vid_id = None
     try:
@@ -359,7 +368,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         if conn:
             db_pool.putconn(conn)
 
-    # ✅ STEP 3: Baaki channels (BACKUP_2, PAID_CH) par copy_message se upload
+    # ✅ STEP 3: BACKUP_2 & PAID_CH par copy_message
     await status.edit_text("⏳ Uploading to Paid Channel & Backup 2...")
     channels_to_upload = [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]
     for ch_id in channels_to_upload:
@@ -368,32 +377,25 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
                 chat_id=ch_id,
                 from_chat_id=msg.chat_id,
                 message_id=msg.message_id,
-                caption=f"🔒 {title}",
+                caption=backup_caption,
                 parse_mode='HTML'
             )
-            logger.info(f"✅ Uploaded to channel: {ch_id} via copy_message")
+            logger.info(f"✅ Uploaded to channel: {ch_id}")
         except Exception as e:
             logger.error(f"❌ Failed to upload to {ch_id}: {e}")
 
     # Generate Links
     web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
-    
     await status.edit_text("⏳ Generating GPLinks...")
     gplink = await shorten_link(web_link)
 
-    # ✅ STEP 4: Post to Free Channel (trim video / thumbnail / full video)
+    # ✅ STEP 4: Post to Free Channel with SAFE HTML caption
     await status.edit_text("⏳ Posting to Free Channel...")
-    caption = (
-        f"🔞 <b>{title}</b>\n\n"
-        f"🔥 <b>Watch Full Video & Download:</b>\n"
-        f"👉 {gplink}\n\n"
-        f"💎 <b>Join VIP for Direct Files:</b> https://t.me/YOUR_VIP_LINK"
-    )
+    caption = build_free_channel_caption(title, gplink)
 
     try:
         if FREE_CH != 0:
             if trim_type == 'photo_bytes' and thumbnail_bytes:
-                # Trim skipped — use extracted thumbnail as photo
                 photo_file = BytesIO(thumbnail_bytes)
                 photo_file.name = "thumbnail.jpg"
                 await context.bot.send_photo(
@@ -403,7 +405,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
                     parse_mode='HTML'
                 )
             elif trim_type == 'photo_url':
-                # Trim skipped & no thumbnail — use placeholder image URL
                 await context.bot.send_photo(
                     chat_id=FREE_CH, 
                     photo=trim_file_id, 
@@ -411,7 +412,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
                     parse_mode='HTML'
                 )
             elif trim_type in ['video', 'document']:
-                # ✅ Trim video ko Free Channel par copy_message se bhejo
                 trim_chat_id = context.user_data.get('trim_chat_id')
                 trim_msg_id = context.user_data.get('trim_msg_id')
                 if trim_chat_id and trim_msg_id:
@@ -424,7 +424,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
                             parse_mode='HTML'
                         )
                     except Exception as e:
-                        logger.error(f"copy_message for trim failed, using fallback: {e}")
+                        logger.error(f"copy_message for trim failed: {e}")
                         await context.bot.send_video(
                             chat_id=FREE_CH,
                             video=trim_file_id,
@@ -433,7 +433,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
                             supports_streaming=True
                         )
                 else:
-                    # Fallback to send_video
                     await context.bot.send_video(
                         chat_id=FREE_CH,
                         video=trim_file_id,
@@ -444,18 +443,16 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
             
             display_title = generate_display_title(title)
             await status.edit_text(
-                f"✅ **ALL DONE!**\n\n"
-                f"🎬 Title: `{display_title}`\n"
+                f"✅ ALL DONE!\n\n"
+                f"🎬 Title: {display_title}\n"
                 f"🔗 Link: {gplink}\n"
-                f"🖼️ Custom Thumbnail: ✅ Preserved via copy_message\n"
-                f"📦 Backup Msg ID: `{backup_msg_id}`",
-                parse_mode='Markdown'
+                f"🖼️ Thumbnail: Preserved via copy_message\n"
+                f"📦 Backup Msg ID: {backup_msg_id}"
             )
         else:
             await status.edit_text(
-                f"✅ **Done!** (Free Channel ID not set)\n"
-                f"🔗 Link: {gplink}",
-                parse_mode='Markdown'
+                f"✅ Done! (Free Channel ID not set)\n"
+                f"🔗 Link: {gplink}"
             )
     except Exception as e:
         logger.error(f"❌ Error posting to free channel: {e}")
@@ -466,7 +463,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ================= BULK UPLOAD FEATURE =================
 async def start_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start bulk upload mode - forward 10-15 videos at once"""
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ Access Denied! Only admin can use this command.")
         return ConversationHandler.END
@@ -475,29 +471,26 @@ async def start_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['bulk_count'] = 0
     
     await update.message.reply_text(
-        "📦 **BULK UPLOAD MODE ACTIVATED!**\n\n"
-        "🎬 Ab aap **10-15 videos ek saath forward** kar sakte ho.\n\n"
-        "📝 **Instructions:**\n"
+        "📦 BULK UPLOAD MODE ACTIVATED!\n\n"
+        "🎬 Ab aap 10-15 videos ek saath forward kar sakte ho.\n\n"
+        "📝 Instructions:\n"
         "1️⃣ Videos ek-ek karke forward karo\n"
         "2️⃣ Har video automatically process hogi\n"
-        "3️⃣ `/done` likho jab saari videos bhej do\n"
-        "4️⃣ `/cancel` se bulk upload cancel kar sakte ho\n\n"
-        "⚡ **Chalo shuru karte hain! Pehli video bhejo...**",
-        parse_mode='Markdown'
+        "3️⃣ /done likho jab saari videos bhej do\n"
+        "4️⃣ /cancel se bulk upload cancel kar sakte ho\n\n"
+        "⚡ Chalo shuru karte hain! Pehli video bhejo..."
     )
     return BULK_WAIT_VIDEO
 
 async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process each video in bulk upload using copy_message"""
     msg = update.message
     
     if msg.text and msg.text.strip().lower() == '/done':
         bulk_count = context.user_data.get('bulk_count', 0)
         await msg.reply_text(
-            f"✅ **BULK UPLOAD COMPLETED!**\n\n"
-            f"📊 Total Videos Processed: `{bulk_count}`\n\n"
-            f"🎉 Saari videos channel par post ho gayi hain!",
-            parse_mode='Markdown'
+            f"✅ BULK UPLOAD COMPLETED!\n\n"
+            f"📊 Total Videos Processed: {bulk_count}\n\n"
+            f"🎉 Saari videos channel par post ho gayi hain!"
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -508,21 +501,22 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
     
     if not msg.video and not msg.document:
-        await msg.reply_text("❌ Please forward a video file. Or type `/done` to finish.")
+        await msg.reply_text("❌ Please forward a video file. Or type /done to finish.")
         return BULK_WAIT_VIDEO
     
     bulk_count = context.user_data.get('bulk_count', 0) + 1
     context.user_data['bulk_count'] = bulk_count
     
-    status = await msg.reply_text(f"⏳ **Processing Video #{bulk_count}...**")
+    status = await msg.reply_text(f"⏳ Processing Video #{bulk_count}...")
     
     try:
         raw_caption = msg.caption if msg.caption else ""
         title = clean_title(raw_caption)
         
         full_file_id = msg.video.file_id if msg.video else msg.document.file_id
+        backup_caption = build_backup_caption(title)
         
-        # ✅ STEP 1: Pehle BACKUP_1 par copy_message se upload
+        # ✅ STEP 1: BACKUP_1 par copy_message
         backup_msg_id = None
         if BACKUP_1 != 0:
             try:
@@ -530,7 +524,7 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     chat_id=BACKUP_1,
                     from_chat_id=msg.chat_id,
                     message_id=msg.message_id,
-                    caption=f"🔒 {title}",
+                    caption=backup_caption,
                     parse_mode='HTML'
                 )
                 backup_msg_id = copied_msg.message_id
@@ -538,7 +532,7 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception as e:
                 logger.error(f"❌ Bulk #{bulk_count}: Failed to copy to Backup 1: {e}")
         
-        # ✅ STEP 2: Database mein save karo (with backup_msg_id)
+        # ✅ STEP 2: Database mein save karo
         conn = None
         vid_id = None
         try:
@@ -555,7 +549,7 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if conn:
                 db_pool.putconn(conn)
         
-        # ✅ STEP 3: Baaki channels par copy_message se upload
+        # ✅ STEP 3: BACKUP_2 & PAID_CH par copy_message
         channels_to_upload = [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]
         for ch_id in channels_to_upload:
             try:
@@ -563,7 +557,7 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     chat_id=ch_id,
                     from_chat_id=msg.chat_id,
                     message_id=msg.message_id,
-                    caption=f"🔒 {title}",
+                    caption=backup_caption,
                     parse_mode='HTML'
                 )
                 logger.info(f"✅ Bulk #{bulk_count}: Uploaded to channel {ch_id}")
@@ -574,13 +568,8 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
         gplink = await shorten_link(web_link)
         
-        # ✅ STEP 4: Post to free channel via copy_message (thumbnail preserved!)
-        caption = (
-            f"🔞 <b>{title}</b>\n\n"
-            f"🔥 <b>Watch Full Video & Download:</b>\n"
-            f"👉 {gplink}\n\n"
-            f"💎 <b>Join VIP for Direct Files:</b> https://t.me/YOUR_VIP_LINK"
-        )
+        # ✅ STEP 4: Free channel par SAFE HTML caption ke saath post
+        caption = build_free_channel_caption(title, gplink)
         
         if FREE_CH != 0:
             try:
@@ -591,9 +580,9 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     caption=caption,
                     parse_mode='HTML'
                 )
-                logger.info(f"✅ Bulk #{bulk_count}: Posted to Free Channel via copy_message")
+                logger.info(f"✅ Bulk #{bulk_count}: Posted to Free Channel")
             except Exception as e:
-                logger.error(f"copy_message to free channel failed, using fallback: {e}")
+                logger.error(f"copy_message to free channel failed: {e}")
                 try:
                     await context.bot.send_video(
                         chat_id=FREE_CH,
@@ -607,30 +596,26 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         display_title = generate_display_title(title)
         await status.edit_text(
-            f"✅ **Video #{bulk_count} Done!**\n\n"
-            f"📝 Title: `{display_title}`\n"
+            f"✅ Video #{bulk_count} Done!\n\n"
+            f"📝 Title: {display_title}\n"
             f"🔗 Link: {gplink}\n"
-            f"🖼️ Thumbnail: ✅ Preserved via copy_message\n\n"
-            f"📥 **Aur videos forward karo ya `/done` likho!**",
-            parse_mode='Markdown'
+            f"🖼️ Thumbnail: Preserved via copy_message\n\n"
+            f"📥 Aur videos forward karo ya /done likho!"
         )
         
     except Exception as e:
         logger.error(f"Bulk upload error: {e}")
-        await status.edit_text(f"❌ Error processing video #{bulk_count}: {e}\n\nContinue with next video or `/done` to finish.")
+        await status.edit_text(f"❌ Error processing video #{bulk_count}: {e}\n\nContinue with next video or /done to finish.")
     
     return BULK_WAIT_VIDEO
 
 async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel the current conversation"""
     context.user_data.clear()
     await update.message.reply_text("❌ Upload process cancelled.")
     return ConversationHandler.END
 
-# ================= PROVIDER BOT: GIVING THE VIDEO =================
-# ⚠️ IMPORTANT: Provider Bot ko BACKUP_1 channel mein Admin/Member banana zaroori hai!
+# ================= PROVIDER BOT =================
 async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Provider bot sends video to user via copy_message from Backup Channel"""
     text = update.message.text
     chat_id = update.effective_chat.id
     user_name = update.effective_user.first_name
@@ -643,7 +628,6 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 conn = get_db_connection()
                 cur = conn.cursor()
-                # ✅ Naya Select — backup_msg_id bhi read karo
                 cur.execute("SELECT title, full_file_id, backup_msg_id FROM adult_videos WHERE vid_id = %s", (vid_id,))
                 result = cur.fetchone()
                 cur.close()
@@ -656,14 +640,13 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 warning_msg = await update.message.reply_text(
                     text=(
-                        f"👋 Hello **{user_name}**!\n\n"
-                        "⚠️ **IMPORTANT NOTICE**\n\n"
-                        "🕒 Yeh video **5 minutes** baad auto-delete ho jayegi.\n\n"
-                        "💾 **Saved Messages mein forward zaroor kar lena!**\n\n"
-                        "🔒 _Yeh copyright protection ke liye hai._\n\n"
+                        f"👋 Hello {user_name}!\n\n"
+                        "⚠️ IMPORTANT NOTICE\n\n"
+                        "🕒 Yeh video 5 minutes baad auto-delete ho jayegi.\n\n"
+                        "💾 Saved Messages mein forward zaroor kar lena!\n\n"
+                        "🔒 Yeh copyright protection ke liye hai.\n\n"
                         "⏳ Video bhej rahe hain..."
-                    ),
-                    parse_mode='Markdown'
+                    )
                 )
                 
                 await asyncio.sleep(2)
@@ -672,38 +655,36 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except:
                     pass
                 
+                # ✅ SAFE caption without parse_mode issues
                 caption_text = (
-                    f"🎬 **{title}**\n\n"
-                    f"⏱️ **Auto-Delete:** 5 minutes\n"
-                    f"💾 **Forward to Saved Messages ASAP!**\n\n"
-                    f"⚠️ _Yeh file automatically delete ho jayegi._"
+                    f"🎬 {title}\n\n"
+                    f"⏱️ Auto-Delete: 5 minutes\n"
+                    f"💾 Forward to Saved Messages ASAP!\n\n"
+                    f"⚠️ Yeh file automatically delete ho jayegi."
                 )
 
                 sent_msg_id = None
                 
-                # ✅ PRIMARY: Provider Bot BACKUP CHANNEL se user ko copy_message karega!
-                # Isse custom thumbnail 100% preserved rahega
+                # ✅ PRIMARY: copy_message from Backup Channel (thumbnail preserved!)
                 if backup_msg_id and BACKUP_1 != 0:
                     try:
                         copied_msg = await context.bot.copy_message(
                             chat_id=chat_id,
                             from_chat_id=BACKUP_1,
                             message_id=backup_msg_id,
-                            caption=caption_text,
-                            parse_mode='Markdown'
+                            caption=caption_text
                         )
                         sent_msg_id = copied_msg.message_id
-                        logger.info(f"✅ Sent video to user {chat_id} using copy_message from Backup Channel")
+                        logger.info(f"✅ Sent video to user {chat_id} using copy_message")
                     except Exception as e:
-                        logger.error(f"copy_message failed, falling back to file_id: {e}")
+                        logger.error(f"copy_message failed, falling back: {e}")
                 
-                # ✅ FALLBACK: Agar copy_message fail ho jaye ya purani video ho (backup_msg_id = None)
+                # ✅ FALLBACK: file_id se bhejo
                 if not sent_msg_id:
                     try:
                         fallback_msg = await update.message.reply_video(
                             video=file_id, 
                             caption=caption_text,
-                            parse_mode='Markdown',
                             supports_streaming=True
                         )
                         sent_msg_id = fallback_msg.message_id
@@ -713,7 +694,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await update.message.reply_text("❌ Video bhejne mein error aaya. Please try again.")
                         return
                 
-                # ✅ Auto delete schedule karo (message_id pass kar rahe hain)
+                # Auto delete schedule
                 asyncio.create_task(
                     auto_delete_with_notification(
                         context=context,
@@ -723,11 +704,11 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 )
                 
-                logger.info(f"✅ Auto-delete scheduled for user {chat_id}, msg_id {sent_msg_id}")
+                logger.info(f"✅ Auto-delete scheduled for user {chat_id}")
                 
             else:
                 await update.message.reply_text(
-                    "❌ **Video Not Found!**\n\n"
+                    "❌ Video Not Found!\n\n"
                     "Yeh video delete ho chuki hai ya invalid link hai.\n"
                     "Naya link free channel se lein."
                 )
@@ -738,14 +719,13 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Something went wrong. Please try again.")
     else:
         await update.message.reply_text(
-            "🔞 **Welcome!**\n\n"
+            "🔞 Welcome!\n\n"
             "Please use a valid video link to access content.\n"
             "Example: Click on a video link from our free channel.\n\n"
-            "⚠️ **Note:** All videos auto-delete after 5 minutes for security."
+            "⚠️ Note: All videos auto-delete after 5 minutes for security."
         )
 
 async def periodic_cleanup(context):
-    """Periodic cleanup of old database entries"""
     while True:
         await asyncio.sleep(3600)
         try:
@@ -763,7 +743,6 @@ async def periodic_cleanup(context):
 
 # ================= RUN MULTIPLE BOTS =================
 async def run_bots():
-    """Run both Main and Provider bots"""
     if not MAIN_BOT_TOKEN:
         logger.error("❌ MAIN_BOT_TOKEN not found!")
         return
@@ -859,3 +838,4 @@ if __name__ == '__main__':
         logger.info("🛑 Shutting down...")
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
+        
