@@ -82,30 +82,16 @@ def setup_db():
 
 # ================= HELPER FUNCTIONS =================
 
-# ✅ NEW: Clean Title Function
 def clean_title(raw_title):
-    """
-    Clean the title by removing:
-    - @mentions and channel names
-    - File extensions (.mkv, .mp4, etc.)
-    - Extra text like "1min from 0:06:51 of"
-    - Special characters and extra spaces
-    """
+    """Clean the title by removing unwanted text"""
     if not raw_title:
         return "🔥 Exclusive Premium Content 🔥"
     
     title = raw_title.strip()
-    
-    # Remove @mentions (e.g., @UnratedHD, @ChannelName)
     title = re.sub(r'@\w+', '', title)
-    
-    # Remove "1min from 0:06:51 of" type text
     title = re.sub(r'\d+min\s+from\s+\d+:\d+:\d+\s+of\s+', '', title, flags=re.IGNORECASE)
-    
-    # Remove file extensions
     title = re.sub(r'\.(mkv|mp4|avi|mov|wmv|flv|webm|m4v)', '', title, flags=re.IGNORECASE)
     
-    # Remove common unwanted words
     unwanted_patterns = [
         r'\b(Seva|HEVC|HDRip|UNRAT|UNRATED|720p|1080p|480p|4K|2160p)\b',
         r'\b(Dzyreplay|DZREPLAY|Replay)\b',
@@ -114,19 +100,15 @@ def clean_title(raw_title):
     for pattern in unwanted_patterns:
         title = re.sub(pattern, '', title, flags=re.IGNORECASE)
     
-    # Remove extra spaces and special characters
     title = re.sub(r'\s+', ' ', title)
     title = re.sub(r'[^\w\s\-\(\)]', '', title)
     title = title.strip()
     
-    # If title becomes too short, use default
     if len(title) < 5:
         return "🔥 Exclusive Premium Content 🔥"
     
-    # Add emoji for better look
     return f"🔞 {title}"
 
-# ✅ NEW: Generate Short Title for Display
 def generate_display_title(cleaned_title):
     """Generate a shorter display title for status messages"""
     if len(cleaned_title) > 50:
@@ -156,6 +138,7 @@ def get_db_connection():
         raise Exception("Database pool not initialized")
     return db_pool.getconn()
 
+# ✅ FIXED: Extract thumbnail as bytes (for custom cover preservation)
 async def extract_thumbnail_as_bytes(context, thumb_obj):
     """Extract thumbnail from video and return as bytes"""
     try:
@@ -165,6 +148,58 @@ async def extract_thumbnail_as_bytes(context, thumb_obj):
     except Exception as e:
         logger.error(f"Thumbnail extraction error: {e}")
         return None
+
+# ✅ NEW: Get thumbnail from video message
+async def get_video_thumbnail(context, msg):
+    """
+    Get thumbnail from video/document message.
+    Returns thumbnail bytes if available, None otherwise.
+    """
+    thumb_obj = None
+    
+    if msg.video and msg.video.thumbnail:
+        thumb_obj = msg.video.thumbnail
+    elif msg.document and msg.document.thumbnail:
+        thumb_obj = msg.document.thumbnail
+    
+    if thumb_obj:
+        thumbnail_bytes = await extract_thumbnail_as_bytes(context, thumb_obj)
+        return thumbnail_bytes
+    
+    return None
+
+# ✅ FIXED: Send video with preserved thumbnail
+async def send_video_with_thumbnail(context, chat_id, video_file_id, caption, thumb_bytes=None):
+    """
+    Send video to channel with custom thumbnail preserved.
+    This ensures your custom cover image is not lost.
+    """
+    try:
+        if thumb_bytes:
+            # Use custom thumbnail as BytesIO
+            thumb_file = BytesIO(thumb_bytes)
+            thumb_file.name = "thumbnail.jpg"
+            await context.bot.send_video(
+                chat_id=chat_id,
+                video=video_file_id,
+                caption=caption,
+                parse_mode='HTML',
+                thumbnail=thumb_file,
+                supports_streaming=True
+            )
+        else:
+            # Send without custom thumbnail (Telegram will generate one)
+            await context.bot.send_video(
+                chat_id=chat_id,
+                video=video_file_id,
+                caption=caption,
+                parse_mode='HTML',
+                supports_streaming=True
+            )
+        return True
+    except Exception as e:
+        logger.error(f"Error sending video with thumbnail: {e}")
+        return False
 
 async def auto_delete_with_notification(context, chat_id, video_msg, delete_time=AUTO_DELETE_TIME):
     """Auto-delete video after specified time with prior notification"""
@@ -266,7 +301,6 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Error: Ye video nahi hai. Kripya Trimmed Video bhejo ya `/skip` likho.")
         return WAIT_TRIM
     
-    # ✅ FIXED: Clean the title from caption
     raw_caption = msg.caption if msg.caption else ""
     cleaned_title = clean_title(raw_caption)
     
@@ -302,7 +336,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
 
     status = await msg.reply_text("⏳ **Processing Started...**")
     
-    # ✅ FIXED: Clean title from full video caption if not already set
     title = context.user_data.get('title', '')
     if not title or title == "🔞 ":
         raw_caption = msg.caption if msg.caption else ""
@@ -313,26 +346,28 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     trim_type = context.user_data.get('trim_type', 'video')
     trim_file_id = context.user_data.get('trim_file')
 
+    # ✅ FIXED: Extract thumbnail from FULL video for preservation
+    await status.edit_text("⏳ Extracting Custom Thumbnail...")
+    full_video_thumb_bytes = await get_video_thumbnail(context, msg)
+    
+    if full_video_thumb_bytes:
+        logger.info("✅ Custom thumbnail extracted from full video")
+    else:
+        logger.warning("⚠️ No custom thumbnail found in full video")
+
     thumbnail_bytes = None
     if trim_file_id == 'use_thumbnail':
         await status.edit_text("⏳ Extracting Thumbnail from Video...")
         
-        thumb_obj = None
-        if msg.video and msg.video.thumbnail:
-            thumb_obj = msg.video.thumbnail
-        elif msg.document and msg.document.thumbnail:
-            thumb_obj = msg.document.thumbnail
-            
-        if thumb_obj:
-            thumbnail_bytes = await extract_thumbnail_as_bytes(context, thumb_obj)
-            if thumbnail_bytes:
-                trim_type = 'photo_bytes'
-            else:
-                trim_file_id = "https://i.imgur.com/6XK4F6K.png"
-                trim_type = 'photo_url'
+        if full_video_thumb_bytes:
+            thumbnail_bytes = full_video_thumb_bytes
+            trim_type = 'photo_bytes'
         else:
             trim_file_id = "https://i.imgur.com/6XK4F6K.png"
             trim_type = 'photo_url'
+    else:
+        # Use trim video as is
+        thumbnail_bytes = full_video_thumb_bytes  # Preserve custom thumbnail for channels
 
     # Save to Database
     conn = None
@@ -354,14 +389,21 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         if conn:
             db_pool.putconn(conn)
 
-    # Upload to Backups & Paid Channel
+    # ✅ FIXED: Upload to Backups & Paid Channel WITH THUMBNAIL
     await status.edit_text("⏳ Uploading to Backups & Paid Channel...")
     channels_to_upload = [ch for ch in [BACKUP_1, BACKUP_2, PAID_CH] if ch != 0]
     
     for ch_id in channels_to_upload:
         try:
-            await context.bot.send_video(chat_id=ch_id, video=full_file_id, caption=f"🔒 {title}")
-            logger.info(f"✅ Uploaded to channel: {ch_id}")
+            caption = f"🔒 {title}"
+            await send_video_with_thumbnail(
+                context=context,
+                chat_id=ch_id,
+                video_file_id=full_file_id,
+                caption=caption,
+                thumb_bytes=full_video_thumb_bytes  # ✅ Preserve custom thumbnail
+            )
+            logger.info(f"✅ Uploaded to channel: {ch_id} with thumbnail")
         except Exception as e:
             logger.error(f"❌ Failed to upload to {ch_id}: {e}")
 
@@ -377,7 +419,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         f"🔞 <b>{title}</b>\n\n"
         f"🔥 <b>Watch Full Video & Download:</b>\n"
         f"👉 {gplink}\n\n"
-        f"💎 <b>Join VIP for Direct Files:</b> https://t.me/+wcYoTQhIz-ZmOTY1"
+        f"💎 <b>Join VIP for Direct Files:</b> https://t.me/YOUR_VIP_LINK"
     )
 
     try:
@@ -399,18 +441,21 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
                     parse_mode='HTML'
                 )
             elif trim_type in ['video', 'document']:
-                await context.bot.send_video(
-                    chat_id=FREE_CH, 
-                    video=trim_file_id, 
-                    caption=caption, 
-                    parse_mode='HTML'
+                # ✅ FIXED: Send trim video with custom thumbnail from full video
+                await send_video_with_thumbnail(
+                    context=context,
+                    chat_id=FREE_CH,
+                    video_file_id=trim_file_id,
+                    caption=caption,
+                    thumb_bytes=full_video_thumb_bytes  # ✅ Preserve custom thumbnail
                 )
             
             display_title = generate_display_title(title)
             await status.edit_text(
                 f"✅ **ALL DONE!**\n\n"
                 f"🎬 Title: `{display_title}`\n"
-                f"🔗 Link: {gplink}",
+                f"🔗 Link: {gplink}\n"
+                f"🖼️ Custom Thumbnail: {'✅ Preserved' if full_video_thumb_bytes else '⚠️ Not Found'}",
                 parse_mode='Markdown'
             )
         else:
@@ -453,7 +498,6 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
     """Process each video in bulk upload"""
     msg = update.message
     
-    # Check for /done command
     if msg.text and msg.text.strip().lower() == '/done':
         bulk_count = context.user_data.get('bulk_count', 0)
         await msg.reply_text(
@@ -465,29 +509,28 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.clear()
         return ConversationHandler.END
     
-    # Check for /cancel command
     if msg.text and msg.text.strip().lower() == '/cancel':
         context.user_data.clear()
         await msg.reply_text("❌ Bulk upload cancelled.")
         return ConversationHandler.END
     
-    # Check if it's a video
     if not msg.video and not msg.document:
         await msg.reply_text("❌ Please forward a video file. Or type `/done` to finish.")
         return BULK_WAIT_VIDEO
     
-    # Process the video
     bulk_count = context.user_data.get('bulk_count', 0) + 1
     context.user_data['bulk_count'] = bulk_count
     
     status = await msg.reply_text(f"⏳ **Processing Video #{bulk_count}...**")
     
     try:
-        # Extract and clean title
         raw_caption = msg.caption if msg.caption else ""
         title = clean_title(raw_caption)
         
         full_file_id = msg.video.file_id if msg.video else msg.document.file_id
+        
+        # ✅ FIXED: Extract and preserve custom thumbnail
+        thumb_bytes = await get_video_thumbnail(context, msg)
         
         # Save to database
         conn = None
@@ -503,11 +546,18 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if conn:
                 db_pool.putconn(conn)
         
-        # Upload to backup channels
+        # Upload to backup channels WITH THUMBNAIL
         channels_to_upload = [ch for ch in [BACKUP_1, BACKUP_2, PAID_CH] if ch != 0]
         for ch_id in channels_to_upload:
             try:
-                await context.bot.send_video(chat_id=ch_id, video=full_file_id, caption=f"🔒 {title}")
+                caption = f"🔒 {title}"
+                await send_video_with_thumbnail(
+                    context=context,
+                    chat_id=ch_id,
+                    video_file_id=full_file_id,
+                    caption=caption,
+                    thumb_bytes=thumb_bytes
+                )
             except Exception as e:
                 logger.error(f"Failed to upload to {ch_id}: {e}")
         
@@ -515,48 +565,29 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
         gplink = await shorten_link(web_link)
         
-        # Post to free channel
+        # Post to free channel WITH THUMBNAIL
         caption = (
             f"🔞 <b>{title}</b>\n\n"
             f"🔥 <b>Watch Full Video & Download:</b>\n"
             f"👉 {gplink}\n\n"
-            f"💎 <b>Join VIP for Direct Files:</b> https://t.me/+wcYoTQhIz-ZmOTY1"
+            f"💎 <b>Join VIP for Direct Files:</b> https://t.me/YOUR_VIP_LINK"
         )
         
         if FREE_CH != 0:
-            # Extract thumbnail for free channel
-            thumbnail_bytes = None
-            thumb_obj = None
-            if msg.video and msg.video.thumbnail:
-                thumb_obj = msg.video.thumbnail
-            elif msg.document and msg.document.thumbnail:
-                thumb_obj = msg.document.thumbnail
-            
-            if thumb_obj:
-                thumbnail_bytes = await extract_thumbnail_as_bytes(context, thumb_obj)
-            
-            if thumbnail_bytes:
-                photo_file = BytesIO(thumbnail_bytes)
-                photo_file.name = "thumbnail.jpg"
-                await context.bot.send_photo(
-                    chat_id=FREE_CH, 
-                    photo=photo_file, 
-                    caption=caption, 
-                    parse_mode='HTML'
-                )
-            elif msg.video:
-                await context.bot.send_video(
-                    chat_id=FREE_CH, 
-                    video=full_file_id, 
-                    caption=caption, 
-                    parse_mode='HTML'
-                )
+            await send_video_with_thumbnail(
+                context=context,
+                chat_id=FREE_CH,
+                video_file_id=full_file_id,
+                caption=caption,
+                thumb_bytes=thumb_bytes
+            )
         
         display_title = generate_display_title(title)
         await status.edit_text(
             f"✅ **Video #{bulk_count} Done!**\n\n"
             f"📝 Title: `{display_title}`\n"
-            f"🔗 Link: {gplink}\n\n"
+            f"🔗 Link: {gplink}\n"
+            f"🖼️ Thumbnail: {'✅ Preserved' if thumb_bytes else '⚠️ Auto-generated'}\n\n"
             f"📥 **Aur videos forward karo ya `/done` likho!**",
             parse_mode='Markdown'
         )
@@ -684,7 +715,6 @@ async def run_bots():
     
     main_app = Application.builder().token(MAIN_BOT_TOKEN).build()
     
-    # Single Upload Conversation
     upload_conv = ConversationHandler(
         entry_points=[CommandHandler('post', start_upload)],
         states={
@@ -697,7 +727,6 @@ async def run_bots():
     )
     main_app.add_handler(upload_conv)
     
-    # ✅ BULK UPLOAD Conversation
     bulk_conv = ConversationHandler(
         entry_points=[CommandHandler('bulk', start_bulk_upload)],
         states={
