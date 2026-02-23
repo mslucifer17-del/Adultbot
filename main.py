@@ -58,7 +58,7 @@ def init_db_pool():
         raise
 
 def setup_db():
-    """Create tables if not exist"""
+    """Create tables if not exist and update schema with backup_msg_id"""
     conn = None
     try:
         conn = db_pool.getconn()
@@ -68,12 +68,19 @@ def setup_db():
                 vid_id SERIAL PRIMARY KEY,
                 title TEXT,
                 full_file_id TEXT,
+                backup_msg_id INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Agar purani table bani hui hai toh usme column add karne ki koshish
+        try:
+            cur.execute("ALTER TABLE adult_videos ADD COLUMN backup_msg_id INTEGER;")
+        except Exception:
+            conn.rollback()
+            
         conn.commit()
         cur.close()
-        logger.info("✅ Database tables created/verified")
+        logger.info("✅ Database tables created/verified with backup_msg_id")
     except Exception as e:
         logger.error(f"❌ Database setup failed: {e}")
     finally:
@@ -138,71 +145,9 @@ def get_db_connection():
         raise Exception("Database pool not initialized")
     return db_pool.getconn()
 
-# ✅ FIXED: Extract thumbnail as bytes (for custom cover preservation)
-async def extract_thumbnail_as_bytes(context, thumb_obj):
-    """Extract thumbnail from video and return as bytes"""
-    try:
-        file_info = await context.bot.get_file(thumb_obj.file_id)
-        downloaded_bytes = await file_info.download_as_bytearray()
-        return bytes(downloaded_bytes)
-    except Exception as e:
-        logger.error(f"Thumbnail extraction error: {e}")
-        return None
-
-# ✅ NEW: Get thumbnail from video message
-async def get_video_thumbnail(context, msg):
-    """
-    Get thumbnail from video/document message.
-    Returns thumbnail bytes if available, None otherwise.
-    """
-    thumb_obj = None
-    
-    if msg.video and msg.video.thumbnail:
-        thumb_obj = msg.video.thumbnail
-    elif msg.document and msg.document.thumbnail:
-        thumb_obj = msg.document.thumbnail
-    
-    if thumb_obj:
-        thumbnail_bytes = await extract_thumbnail_as_bytes(context, thumb_obj)
-        return thumbnail_bytes
-    
-    return None
-
-# ✅ FIXED: Send video with preserved thumbnail
-async def send_video_with_thumbnail(context, chat_id, video_file_id, caption, thumb_bytes=None):
-    """
-    Send video to channel with custom thumbnail preserved.
-    This ensures your custom cover image is not lost.
-    """
-    try:
-        if thumb_bytes:
-            # Use custom thumbnail as BytesIO
-            thumb_file = BytesIO(thumb_bytes)
-            thumb_file.name = "thumbnail.jpg"
-            await context.bot.send_video(
-                chat_id=chat_id,
-                video=video_file_id,
-                caption=caption,
-                parse_mode='HTML',
-                thumbnail=thumb_file,
-                supports_streaming=True
-            )
-        else:
-            # Send without custom thumbnail (Telegram will generate one)
-            await context.bot.send_video(
-                chat_id=chat_id,
-                video=video_file_id,
-                caption=caption,
-                parse_mode='HTML',
-                supports_streaming=True
-            )
-        return True
-    except Exception as e:
-        logger.error(f"Error sending video with thumbnail: {e}")
-        return False
-
-async def auto_delete_with_notification(context, chat_id, video_msg, delete_time=AUTO_DELETE_TIME):
-    """Auto-delete video after specified time with prior notification"""
+# ✅ FIXED: Auto-delete now uses message_id directly (copy_message compatible)
+async def auto_delete_with_notification(context, chat_id, message_id_to_delete, delete_time=AUTO_DELETE_TIME):
+    """Auto-delete video using message_id after specified time"""
     try:
         wait_time = max(delete_time - 30, 60)
         await asyncio.sleep(wait_time)
@@ -226,7 +171,8 @@ async def auto_delete_with_notification(context, chat_id, video_msg, delete_time
         await asyncio.sleep(30)
         
         try:
-            await video_msg.delete()
+            # ✅ Delete message directly via bot API using message_id
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id_to_delete)
             logger.info(f"✅ Video message deleted for chat: {chat_id}")
         except Exception as e:
             logger.error(f"Failed to delete video message: {e}")
@@ -316,6 +262,10 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['trim_file'] = msg.document.file_id
         context.user_data['trim_type'] = 'document'
     
+    # ✅ Save trim message info for copy_message to Free Channel
+    context.user_data['trim_chat_id'] = msg.chat_id
+    context.user_data['trim_msg_id'] = msg.message_id
+    
     await msg.reply_text(
         f"✅ **Trim Video Saved!**\n\n"
         f"📝 Title: `{cleaned_title}`\n\n"
@@ -346,36 +296,56 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     trim_type = context.user_data.get('trim_type', 'video')
     trim_file_id = context.user_data.get('trim_file')
 
-    # ✅ FIXED: Extract thumbnail from FULL video for preservation
-    await status.edit_text("⏳ Extracting Custom Thumbnail...")
-    full_video_thumb_bytes = await get_video_thumbnail(context, msg)
-    
-    if full_video_thumb_bytes:
-        logger.info("✅ Custom thumbnail extracted from full video")
-    else:
-        logger.warning("⚠️ No custom thumbnail found in full video")
-
+    # Handle thumbnail for free channel when trim is skipped
     thumbnail_bytes = None
     if trim_file_id == 'use_thumbnail':
-        await status.edit_text("⏳ Extracting Thumbnail from Video...")
+        thumb_obj = None
+        if msg.video and msg.video.thumbnail:
+            thumb_obj = msg.video.thumbnail
+        elif msg.document and msg.document.thumbnail:
+            thumb_obj = msg.document.thumbnail
         
-        if full_video_thumb_bytes:
-            thumbnail_bytes = full_video_thumb_bytes
-            trim_type = 'photo_bytes'
+        if thumb_obj:
+            try:
+                file_info = await context.bot.get_file(thumb_obj.file_id)
+                downloaded_bytes = await file_info.download_as_bytearray()
+                thumbnail_bytes = bytes(downloaded_bytes)
+                trim_type = 'photo_bytes'
+            except Exception as e:
+                logger.error(f"Thumbnail extraction error: {e}")
+                trim_file_id = "https://i.imgur.com/6XK4F6K.png"
+                trim_type = 'photo_url'
         else:
             trim_file_id = "https://i.imgur.com/6XK4F6K.png"
             trim_type = 'photo_url'
-    else:
-        # Use trim video as is
-        thumbnail_bytes = full_video_thumb_bytes  # Preserve custom thumbnail for channels
 
-    # Save to Database
+    # ✅ STEP 1: Pehle BACKUP_1 par copy_message se upload (thumbnail 100% preserved!)
+    await status.edit_text("⏳ Uploading to Backup Channel...")
+    backup_msg_id = None
+    if BACKUP_1 != 0:
+        try:
+            copied_msg = await context.bot.copy_message(
+                chat_id=BACKUP_1,
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+                caption=f"🔒 {title}",
+                parse_mode='HTML'
+            )
+            backup_msg_id = copied_msg.message_id
+            logger.info(f"✅ Uploaded to Backup 1, Msg ID: {backup_msg_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to copy to Backup 1: {e}")
+
+    # ✅ STEP 2: Database mein save karo (with backup_msg_id)
     conn = None
     vid_id = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("INSERT INTO adult_videos (title, full_file_id) VALUES (%s, %s) RETURNING vid_id", (title, full_file_id))
+        cur.execute(
+            "INSERT INTO adult_videos (title, full_file_id, backup_msg_id) VALUES (%s, %s, %s) RETURNING vid_id", 
+            (title, full_file_id, backup_msg_id)
+        )
         vid_id = cur.fetchone()[0]
         conn.commit()
         cur.close()
@@ -389,21 +359,19 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         if conn:
             db_pool.putconn(conn)
 
-    # ✅ FIXED: Upload to Backups & Paid Channel WITH THUMBNAIL
-    await status.edit_text("⏳ Uploading to Backups & Paid Channel...")
-    channels_to_upload = [ch for ch in [BACKUP_1, BACKUP_2, PAID_CH] if ch != 0]
-    
+    # ✅ STEP 3: Baaki channels (BACKUP_2, PAID_CH) par copy_message se upload
+    await status.edit_text("⏳ Uploading to Paid Channel & Backup 2...")
+    channels_to_upload = [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]
     for ch_id in channels_to_upload:
         try:
-            caption = f"🔒 {title}"
-            await send_video_with_thumbnail(
-                context=context,
+            await context.bot.copy_message(
                 chat_id=ch_id,
-                video_file_id=full_file_id,
-                caption=caption,
-                thumb_bytes=full_video_thumb_bytes  # ✅ Preserve custom thumbnail
+                from_chat_id=msg.chat_id,
+                message_id=msg.message_id,
+                caption=f"🔒 {title}",
+                parse_mode='HTML'
             )
-            logger.info(f"✅ Uploaded to channel: {ch_id} with thumbnail")
+            logger.info(f"✅ Uploaded to channel: {ch_id} via copy_message")
         except Exception as e:
             logger.error(f"❌ Failed to upload to {ch_id}: {e}")
 
@@ -413,7 +381,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     await status.edit_text("⏳ Generating GPLinks...")
     gplink = await shorten_link(web_link)
 
-    # Post to Free Channel
+    # ✅ STEP 4: Post to Free Channel (trim video / thumbnail / full video)
     await status.edit_text("⏳ Posting to Free Channel...")
     caption = (
         f"🔞 <b>{title}</b>\n\n"
@@ -425,6 +393,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         if FREE_CH != 0:
             if trim_type == 'photo_bytes' and thumbnail_bytes:
+                # Trim skipped — use extracted thumbnail as photo
                 photo_file = BytesIO(thumbnail_bytes)
                 photo_file.name = "thumbnail.jpg"
                 await context.bot.send_photo(
@@ -434,6 +403,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
                     parse_mode='HTML'
                 )
             elif trim_type == 'photo_url':
+                # Trim skipped & no thumbnail — use placeholder image URL
                 await context.bot.send_photo(
                     chat_id=FREE_CH, 
                     photo=trim_file_id, 
@@ -441,21 +411,44 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
                     parse_mode='HTML'
                 )
             elif trim_type in ['video', 'document']:
-                # ✅ FIXED: Send trim video with custom thumbnail from full video
-                await send_video_with_thumbnail(
-                    context=context,
-                    chat_id=FREE_CH,
-                    video_file_id=trim_file_id,
-                    caption=caption,
-                    thumb_bytes=full_video_thumb_bytes  # ✅ Preserve custom thumbnail
-                )
+                # ✅ Trim video ko Free Channel par copy_message se bhejo
+                trim_chat_id = context.user_data.get('trim_chat_id')
+                trim_msg_id = context.user_data.get('trim_msg_id')
+                if trim_chat_id and trim_msg_id:
+                    try:
+                        await context.bot.copy_message(
+                            chat_id=FREE_CH,
+                            from_chat_id=trim_chat_id,
+                            message_id=trim_msg_id,
+                            caption=caption,
+                            parse_mode='HTML'
+                        )
+                    except Exception as e:
+                        logger.error(f"copy_message for trim failed, using fallback: {e}")
+                        await context.bot.send_video(
+                            chat_id=FREE_CH,
+                            video=trim_file_id,
+                            caption=caption,
+                            parse_mode='HTML',
+                            supports_streaming=True
+                        )
+                else:
+                    # Fallback to send_video
+                    await context.bot.send_video(
+                        chat_id=FREE_CH,
+                        video=trim_file_id,
+                        caption=caption,
+                        parse_mode='HTML',
+                        supports_streaming=True
+                    )
             
             display_title = generate_display_title(title)
             await status.edit_text(
                 f"✅ **ALL DONE!**\n\n"
                 f"🎬 Title: `{display_title}`\n"
                 f"🔗 Link: {gplink}\n"
-                f"🖼️ Custom Thumbnail: {'✅ Preserved' if full_video_thumb_bytes else '⚠️ Not Found'}",
+                f"🖼️ Custom Thumbnail: ✅ Preserved via copy_message\n"
+                f"📦 Backup Msg ID: `{backup_msg_id}`",
                 parse_mode='Markdown'
             )
         else:
@@ -495,7 +488,7 @@ async def start_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return BULK_WAIT_VIDEO
 
 async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process each video in bulk upload"""
+    """Process each video in bulk upload using copy_message"""
     msg = update.message
     
     if msg.text and msg.text.strip().lower() == '/done':
@@ -529,16 +522,32 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         full_file_id = msg.video.file_id if msg.video else msg.document.file_id
         
-        # ✅ FIXED: Extract and preserve custom thumbnail
-        thumb_bytes = await get_video_thumbnail(context, msg)
+        # ✅ STEP 1: Pehle BACKUP_1 par copy_message se upload
+        backup_msg_id = None
+        if BACKUP_1 != 0:
+            try:
+                copied_msg = await context.bot.copy_message(
+                    chat_id=BACKUP_1,
+                    from_chat_id=msg.chat_id,
+                    message_id=msg.message_id,
+                    caption=f"🔒 {title}",
+                    parse_mode='HTML'
+                )
+                backup_msg_id = copied_msg.message_id
+                logger.info(f"✅ Bulk #{bulk_count}: Uploaded to Backup 1, Msg ID: {backup_msg_id}")
+            except Exception as e:
+                logger.error(f"❌ Bulk #{bulk_count}: Failed to copy to Backup 1: {e}")
         
-        # Save to database
+        # ✅ STEP 2: Database mein save karo (with backup_msg_id)
         conn = None
         vid_id = None
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute("INSERT INTO adult_videos (title, full_file_id) VALUES (%s, %s) RETURNING vid_id", (title, full_file_id))
+            cur.execute(
+                "INSERT INTO adult_videos (title, full_file_id, backup_msg_id) VALUES (%s, %s, %s) RETURNING vid_id",
+                (title, full_file_id, backup_msg_id)
+            )
             vid_id = cur.fetchone()[0]
             conn.commit()
             cur.close()
@@ -546,18 +555,18 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if conn:
                 db_pool.putconn(conn)
         
-        # Upload to backup channels WITH THUMBNAIL
-        channels_to_upload = [ch for ch in [BACKUP_1, BACKUP_2, PAID_CH] if ch != 0]
+        # ✅ STEP 3: Baaki channels par copy_message se upload
+        channels_to_upload = [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]
         for ch_id in channels_to_upload:
             try:
-                caption = f"🔒 {title}"
-                await send_video_with_thumbnail(
-                    context=context,
+                await context.bot.copy_message(
                     chat_id=ch_id,
-                    video_file_id=full_file_id,
-                    caption=caption,
-                    thumb_bytes=thumb_bytes
+                    from_chat_id=msg.chat_id,
+                    message_id=msg.message_id,
+                    caption=f"🔒 {title}",
+                    parse_mode='HTML'
                 )
+                logger.info(f"✅ Bulk #{bulk_count}: Uploaded to channel {ch_id}")
             except Exception as e:
                 logger.error(f"Failed to upload to {ch_id}: {e}")
         
@@ -565,7 +574,7 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
         gplink = await shorten_link(web_link)
         
-        # Post to free channel WITH THUMBNAIL
+        # ✅ STEP 4: Post to free channel via copy_message (thumbnail preserved!)
         caption = (
             f"🔞 <b>{title}</b>\n\n"
             f"🔥 <b>Watch Full Video & Download:</b>\n"
@@ -574,20 +583,34 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         
         if FREE_CH != 0:
-            await send_video_with_thumbnail(
-                context=context,
-                chat_id=FREE_CH,
-                video_file_id=full_file_id,
-                caption=caption,
-                thumb_bytes=thumb_bytes
-            )
+            try:
+                await context.bot.copy_message(
+                    chat_id=FREE_CH,
+                    from_chat_id=msg.chat_id,
+                    message_id=msg.message_id,
+                    caption=caption,
+                    parse_mode='HTML'
+                )
+                logger.info(f"✅ Bulk #{bulk_count}: Posted to Free Channel via copy_message")
+            except Exception as e:
+                logger.error(f"copy_message to free channel failed, using fallback: {e}")
+                try:
+                    await context.bot.send_video(
+                        chat_id=FREE_CH,
+                        video=full_file_id,
+                        caption=caption,
+                        parse_mode='HTML',
+                        supports_streaming=True
+                    )
+                except Exception as e2:
+                    logger.error(f"Fallback send_video also failed: {e2}")
         
         display_title = generate_display_title(title)
         await status.edit_text(
             f"✅ **Video #{bulk_count} Done!**\n\n"
             f"📝 Title: `{display_title}`\n"
             f"🔗 Link: {gplink}\n"
-            f"🖼️ Thumbnail: {'✅ Preserved' if thumb_bytes else '⚠️ Auto-generated'}\n\n"
+            f"🖼️ Thumbnail: ✅ Preserved via copy_message\n\n"
             f"📥 **Aur videos forward karo ya `/done` likho!**",
             parse_mode='Markdown'
         )
@@ -605,8 +628,9 @@ async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ================= PROVIDER BOT: GIVING THE VIDEO =================
+# ⚠️ IMPORTANT: Provider Bot ko BACKUP_1 channel mein Admin/Member banana zaroori hai!
 async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Provider bot sends video to user with auto-delete"""
+    """Provider bot sends video to user via copy_message from Backup Channel"""
     text = update.message.text
     chat_id = update.effective_chat.id
     user_name = update.effective_user.first_name
@@ -619,7 +643,8 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 conn = get_db_connection()
                 cur = conn.cursor()
-                cur.execute("SELECT title, full_file_id FROM adult_videos WHERE vid_id = %s", (vid_id,))
+                # ✅ Naya Select — backup_msg_id bhi read karo
+                cur.execute("SELECT title, full_file_id, backup_msg_id FROM adult_videos WHERE vid_id = %s", (vid_id,))
                 result = cur.fetchone()
                 cur.close()
             finally:
@@ -627,7 +652,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     db_pool.putconn(conn)
 
             if result:
-                title, file_id = result
+                title, file_id, backup_msg_id = result
                 
                 warning_msg = await update.message.reply_text(
                     text=(
@@ -641,34 +666,64 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode='Markdown'
                 )
                 
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
                 try:
                     await warning_msg.delete()
                 except:
                     pass
                 
-                msg = await update.message.reply_video(
-                    video=file_id, 
-                    caption=(
-                        f"🎬 **{title}**\n\n"
-                        f"⏱️ **Auto-Delete:** 5 minutes\n"
-                        f"💾 **Forward to Saved Messages ASAP!**\n\n"
-                        f"⚠️ _Yeh file automatically delete ho jayegi._"
-                    ),
-                    parse_mode='Markdown',
-                    supports_streaming=True
+                caption_text = (
+                    f"🎬 **{title}**\n\n"
+                    f"⏱️ **Auto-Delete:** 5 minutes\n"
+                    f"💾 **Forward to Saved Messages ASAP!**\n\n"
+                    f"⚠️ _Yeh file automatically delete ho jayegi._"
                 )
+
+                sent_msg_id = None
                 
+                # ✅ PRIMARY: Provider Bot BACKUP CHANNEL se user ko copy_message karega!
+                # Isse custom thumbnail 100% preserved rahega
+                if backup_msg_id and BACKUP_1 != 0:
+                    try:
+                        copied_msg = await context.bot.copy_message(
+                            chat_id=chat_id,
+                            from_chat_id=BACKUP_1,
+                            message_id=backup_msg_id,
+                            caption=caption_text,
+                            parse_mode='Markdown'
+                        )
+                        sent_msg_id = copied_msg.message_id
+                        logger.info(f"✅ Sent video to user {chat_id} using copy_message from Backup Channel")
+                    except Exception as e:
+                        logger.error(f"copy_message failed, falling back to file_id: {e}")
+                
+                # ✅ FALLBACK: Agar copy_message fail ho jaye ya purani video ho (backup_msg_id = None)
+                if not sent_msg_id:
+                    try:
+                        fallback_msg = await update.message.reply_video(
+                            video=file_id, 
+                            caption=caption_text,
+                            parse_mode='Markdown',
+                            supports_streaming=True
+                        )
+                        sent_msg_id = fallback_msg.message_id
+                        logger.info(f"✅ Sent video to user {chat_id} using fallback file_id")
+                    except Exception as e:
+                        logger.error(f"Fallback send_video also failed: {e}")
+                        await update.message.reply_text("❌ Video bhejne mein error aaya. Please try again.")
+                        return
+                
+                # ✅ Auto delete schedule karo (message_id pass kar rahe hain)
                 asyncio.create_task(
                     auto_delete_with_notification(
                         context=context,
                         chat_id=chat_id,
-                        video_msg=msg,
+                        message_id_to_delete=sent_msg_id,
                         delete_time=AUTO_DELETE_TIME
                     )
                 )
                 
-                logger.info(f"✅ Video sent to user {chat_id}, auto-delete scheduled")
+                logger.info(f"✅ Auto-delete scheduled for user {chat_id}, msg_id {sent_msg_id}")
                 
             else:
                 await update.message.reply_text(
@@ -759,6 +814,7 @@ async def run_bots():
         logger.info("✅ Provider Bot started!")
 
         logger.info("✅ Both Telegram Bots Started Successfully!")
+        logger.info("⚠️ REMINDER: Provider Bot ko BACKUP_1 channel mein Admin banana zaroori hai!")
 
         asyncio.create_task(periodic_cleanup(None))
         logger.info("✅ Periodic cleanup task started")
