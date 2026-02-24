@@ -29,7 +29,7 @@ PROVIDER_BOT_TOKEN = os.environ.get("PROVIDER_BOT_TOKEN")
 PROVIDER_BOT_USERNAME = os.environ.get("PROVIDER_BOT_USERNAME")
 GPLINKS_API_KEY = os.environ.get("GPLINKS_API_KEY")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-WEB_DOMAIN = os.environ.get("WEB_DOMAIN", "https://my-bot.onrender.com")
+WEB_DOMAIN = os.environ.get("WEB_DOMAIN", "https://my-bot.onrender.com").strip()
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 
 FREE_CH = int(os.environ.get("FREE_CHANNEL_ID", "0"))
@@ -42,13 +42,12 @@ UPI_ID = os.environ.get("UPI_ID", "tumhara@upi")
 FREE_CHANNEL_LINK = os.environ.get("FREE_CHANNEL_LINK", "https://t.me/your_free_channel")
 SUBSCRIPTION_AMOUNT = os.environ.get("SUBSCRIPTION_AMOUNT", "10")
 
-# ================= CONVERSATION STATES =================
-# Main bot states
+# ===== MAIN BOT CONVERSATION STATES (Admin Only) =====
 WAIT_TRIM, WAIT_FULL = range(2)
 BULK_WAIT_VIDEO, BULK_CONFIRM = range(2)
 
-# Provider bot payment states
-PAY_SCREENSHOT, PAY_UTR = range(100, 102)
+# ===== PROVIDER BOT PAYMENT STATES (via user_data, NOT ConversationHandler) =====
+# user_data['payment_step'] = 'screenshot' | 'utr' | None
 
 # ================= DATABASE SETUP =================
 db_pool = None
@@ -107,7 +106,7 @@ def setup_db():
 
         conn.commit()
         cur.close()
-        logger.info("✅ Database tables created/verified (videos + qualities + subscribers)")
+        logger.info("✅ Database tables created/verified")
     except Exception as e:
         logger.error(f"❌ Database setup failed: {e}")
         if conn:
@@ -216,13 +215,11 @@ def format_file_size(size_bytes):
 def build_free_channel_caption(title, gplink, qualities_info):
     safe_title = html_escape(title)
     safe_gplink = html_escape(gplink)
-
     quality_text = ""
     if qualities_info:
         quality_text = "\n📊 <b>Available Qualities:</b>\n"
         for q in qualities_info:
             quality_text += f"  • {q['label']} ({q['size']})\n"
-
     return (
         f"🔞 <b>{safe_title}</b>\n"
         f"{quality_text}\n"
@@ -300,6 +297,33 @@ async def auto_delete_with_notification(context, chat_id, message_ids_to_delete,
         logger.error(f"Auto-delete error: {e}")
 
 
+def check_active_subscription(user_id):
+    """Check if user has active subscription. Returns (is_active, end_date)"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT end_date FROM subscribers WHERE user_id = %s",
+            (user_id,)
+        )
+        result = cur.fetchone()
+        cur.close()
+        if result and result[0]:
+            end_date = result[0]
+            if end_date > datetime.now():
+                return True, end_date
+            else:
+                return False, end_date
+        return False, None
+    except Exception as e:
+        logger.error(f"Sub check error: {e}")
+        return False, None
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+
 # ================= WEB REDIRECTOR (FLASK) =================
 app = Flask(__name__)
 
@@ -311,7 +335,7 @@ def home():
 
 @app.route('/watch/<int:vid_id>')
 def watch_video(vid_id):
-    bot_username = os.environ.get("PROVIDER_BOT_USERNAME", "your_bot")
+    bot_username = os.environ.get("PROVIDER_BOT_USERNAME", "your_bot").strip()
     return redirect(f"https://t.me/{bot_username}?start=vid_{vid_id}")
 
 
@@ -320,46 +344,51 @@ def run_flask():
     app.run(host='0.0.0.0', port=port, debug=False)
 
 
-# ================= MAIN BOT: ADMIN START/RESET =================
+# ================================================================
+#                    MAIN BOT (ADMIN ONLY)
+# ================================================================
+
 async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin bot /start - only admin uses this bot"""
     context.user_data.clear()
+
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text(
+            "❌ <b>Access Denied!</b>\n\n"
+            "Yeh Admin Bot hai. Sirf admin use kar sakta hai.\n\n"
+            "👉 Videos ke liye @Niyativideobot use karein.",
+            parse_mode='HTML'
+        )
+        return ConversationHandler.END
+
     await update.message.reply_text(
         "🤖 <b>Admin Bot Ready!</b>\n\n"
         "📌 <b>Commands:</b>\n"
-        "  /post - Single video post (with optional trim/preview)\n"
+        "  /post - Single video post\n"
         "  /bulk - Bulk upload multiple videos\n"
         "  /cancel - Cancel current operation\n"
         "  /start - Reset everything\n\n"
-        "⚡ <b>Multi-Quality Support:</b>\n"
-        "  • Agar ek video ke multiple qualities hain\n"
-        "  • Toh sab ek-ek karke bhejo\n"
-        "  • Bot automatically detect karega quality\n"
-        "  • Users ko quality choose karne ka option milega!\n\n"
-        "💎 <b>Subscription System:</b>\n"
-        "  • Users /start se subscribe kar sakte hain\n"
-        "  • Payment verify hone par auto invite link milega\n"
-        "  • Expiry notification bhi jaayega\n\n"
+        "⚡ <b>Multi-Quality Support Active</b>\n\n"
         "🎬 Shuru karne ke liye /post ya /bulk use karo!",
         parse_mode='HTML'
     )
     return ConversationHandler.END
 
 
-# ================= SINGLE UPLOAD FLOW =================
 async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
-        await update.message.reply_text("❌ Access Denied! Only admin can use this command.")
+        await update.message.reply_text("❌ Access Denied!")
         return ConversationHandler.END
     context.user_data.clear()
     context.user_data['mode'] = 'single'
     context.user_data['full_videos'] = []
     await update.message.reply_text(
-        "⚡ <b>Single Post Mode (Multi-Quality Support)!</b>\n\n"
+        "⚡ <b>Single Post Mode!</b>\n\n"
         "✂️ Sabse pehle <b>TRIM/PREVIEW</b> bhejo:\n"
         "  • 📹 Choti trimmed video\n"
         "  • 🖼️ Ya koi image/photo\n"
-        "  • ⏭️ Ya <code>/skip</code> agar kuch nahi hai\n\n"
-        "❌ Cancel karne ke liye /cancel",
+        "  • ⏭️ Ya <code>/skip</code>\n\n"
+        "❌ Cancel: /cancel",
         parse_mode='HTML'
     )
     return WAIT_TRIM
@@ -373,11 +402,9 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['trim_file'] = 'use_thumbnail'
         context.user_data['trim_type'] = 'skip'
         await msg.reply_text(
-            "⏭️ <b>Trim/Preview Skipped!</b>\n\n"
-            "🔞 Ab <b>FULL VIDEO(s)</b> bhejo.\n\n"
-            "📊 <b>Multiple Qualities?</b>\n"
-            "  • Ek-ek karke saari qualities bhejo\n"
-            "  • Jab sab ho jaye toh <code>/done</code> likho\n\n"
+            "⏭️ <b>Skipped!</b>\n\n"
+            "🔞 Ab <b>FULL VIDEO(s)</b> bhejo.\n"
+            "📊 Multiple qualities? Sab bhejo, phir <code>/done</code>\n\n"
             "❌ Cancel: /cancel",
             parse_mode='HTML'
         )
@@ -427,18 +454,14 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(
             f"✅ <b>Trim Video Saved!</b>\n\n"
             f"📝 Title: {html_escape(cleaned_title)}\n\n"
-            "🔞 Ab <b>FULL VIDEO(s)</b> bhejo.\n"
-            "📊 Multiple qualities? Sab bhejo, phir <code>/done</code>\n\n"
+            "🔞 Ab <b>FULL VIDEO(s)</b> bhejo, phir <code>/done</code>\n\n"
             "❌ Cancel: /cancel",
             parse_mode='HTML'
         )
         return WAIT_FULL
     await msg.reply_text(
-        "❌ Invalid! Please send:\n"
-        "  • 📹 Trim Video\n"
-        "  • 🖼️ Photo/Image\n"
-        "  • ⏭️ /skip\n"
-        "  • ❌ /cancel"
+        "❌ Invalid! Send:\n"
+        "  📹 Trim Video / 🖼️ Photo / ⏭️ /skip / ❌ /cancel"
     )
     return WAIT_TRIM
 
@@ -450,10 +473,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     if msg.text and msg.text.strip().lower() == '/done':
         full_videos = context.user_data.get('full_videos', [])
         if not full_videos:
-            await msg.reply_text(
-                "❌ Koi video nahi mili!\n"
-                "Pehle video(s) bhejo, phir /done likho."
-            )
+            await msg.reply_text("❌ Koi video nahi! Pehle video bhejo, phir /done.")
             return WAIT_FULL
         return await finalize_single_post(update, context)
     if msg.text and msg.text.strip().lower() == '/cancel':
@@ -465,12 +485,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         await msg.reply_text("🔄 Reset! Use /post to start again.")
         return ConversationHandler.END
     if not msg.video and not msg.document:
-        await msg.reply_text(
-            "❌ Yeh video nahi hai!\n\n"
-            "📹 Video file bhejo ya:\n"
-            "  • /done - Sab videos bhej chuke ho toh\n"
-            "  • /cancel - Cancel karna ho toh"
-        )
+        await msg.reply_text("❌ Video file bhejo! Ya /done / /cancel likho.")
         return WAIT_FULL
     raw_caption = msg.caption if msg.caption else ""
     title = context.user_data.get('title', '')
@@ -490,8 +505,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     for existing in full_videos:
         if existing['quality_label'] == quality_label:
             await msg.reply_text(
-                f"⚠️ <b>{quality_label}</b> quality pehle se add ho chuki hai!\n"
-                f"Koi aur quality bhejo ya /done likho.",
+                f"⚠️ <b>{quality_label}</b> pehle se add hai! Aur quality bhejo ya /done.",
                 parse_mode='HTML'
             )
             return WAIT_FULL
@@ -518,9 +532,8 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         f"📊 Quality: <b>{quality_label}</b>\n"
         f"💾 Size: {size_str}\n"
         f"⏱️ Duration: {duration}s\n\n"
-        f"📋 <b>All Qualities So Far:</b>\n{quality_list}\n\n"
-        f"📹 Aur quality bhejo ya <code>/done</code> likho\n"
-        f"❌ Cancel: /cancel",
+        f"📋 <b>All Qualities:</b>\n{quality_list}\n\n"
+        f"📹 Aur bhejo ya <code>/done</code> likho\n❌ Cancel: /cancel",
         parse_mode='HTML'
     )
     return WAIT_FULL
@@ -547,9 +560,9 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         vid_id = cur.fetchone()[0]
         conn.commit()
         cur.close()
-        logger.info(f"✅ Video entry created with ID: {vid_id}")
+        logger.info(f"✅ Video entry created: ID {vid_id}")
     except Exception as e:
-        logger.error(f"❌ Database error: {e}")
+        logger.error(f"❌ DB error: {e}")
         await status.edit_text(f"❌ Database error: {e}")
         context.user_data.clear()
         return ConversationHandler.END
@@ -560,44 +573,28 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     qualities_info = []
     for idx, vdata in enumerate(full_videos):
         q_label = vdata['quality_label']
-        file_id = vdata['file_id']
         src_chat_id = vdata['chat_id']
         src_msg_id = vdata['msg_id']
-        file_size = vdata['file_size']
-        width = vdata['width']
-        height = vdata['height']
-        duration = vdata['duration']
-        await status.edit_text(
-            f"⏳ Uploading quality {idx + 1}/{total}: {q_label}..."
-        )
+        await status.edit_text(f"⏳ Uploading {idx + 1}/{total}: {q_label}...")
         backup_caption = build_backup_caption(title, q_label)
         backup_msg_id = None
         if BACKUP_1 != 0:
             try:
                 copied_msg = await context.bot.copy_message(
-                    chat_id=BACKUP_1,
-                    from_chat_id=src_chat_id,
-                    message_id=src_msg_id,
-                    caption=backup_caption,
-                    parse_mode='HTML'
+                    chat_id=BACKUP_1, from_chat_id=src_chat_id,
+                    message_id=src_msg_id, caption=backup_caption, parse_mode='HTML'
                 )
                 backup_msg_id = copied_msg.message_id
-                logger.info(f"✅ Quality {q_label}: Uploaded to Backup 1, Msg ID: {backup_msg_id}")
             except Exception as e:
-                logger.error(f"❌ Quality {q_label}: Failed to copy to Backup 1: {e}")
-        channels_to_upload = [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]
-        for ch_id in channels_to_upload:
+                logger.error(f"Backup1 error {q_label}: {e}")
+        for ch_id in [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]:
             try:
                 await context.bot.copy_message(
-                    chat_id=ch_id,
-                    from_chat_id=src_chat_id,
-                    message_id=src_msg_id,
-                    caption=backup_caption,
-                    parse_mode='HTML'
+                    chat_id=ch_id, from_chat_id=src_chat_id,
+                    message_id=src_msg_id, caption=backup_caption, parse_mode='HTML'
                 )
-                logger.info(f"✅ Quality {q_label}: Uploaded to channel {ch_id}")
             except Exception as e:
-                logger.error(f"❌ Quality {q_label}: Failed to upload to {ch_id}: {e}")
+                logger.error(f"Channel {ch_id} error: {e}")
         conn2 = None
         try:
             conn2 = get_db_connection()
@@ -606,21 +603,19 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
                 """INSERT INTO video_qualities
                    (vid_id, quality_label, file_id, file_size, width, height, duration,
                     backup_msg_id, backup_channel_id)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (vid_id, q_label, file_id, file_size, width, height, duration,
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (vid_id, q_label, vdata['file_id'], vdata['file_size'],
+                 vdata['width'], vdata['height'], vdata['duration'],
                  backup_msg_id, BACKUP_1)
             )
             conn2.commit()
             cur2.close()
         except Exception as e:
-            logger.error(f"❌ DB error saving quality {q_label}: {e}")
+            logger.error(f"DB quality save error: {e}")
         finally:
             if conn2:
                 db_pool.putconn(conn2)
-        qualities_info.append({
-            'label': q_label,
-            'size': format_file_size(file_size)
-        })
+        qualities_info.append({'label': q_label, 'size': format_file_size(vdata['file_size'])})
 
     await status.edit_text("⏳ Generating link...")
     web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
@@ -632,10 +627,8 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         if FREE_CH != 0:
             if trim_type == 'photo':
                 await context.bot.send_photo(
-                    chat_id=FREE_CH,
-                    photo=trim_file_id,
-                    caption=caption,
-                    parse_mode='HTML'
+                    chat_id=FREE_CH, photo=trim_file_id,
+                    caption=caption, parse_mode='HTML'
                 )
             elif trim_type in ['video', 'animation', 'document']:
                 trim_chat_id = context.user_data.get('trim_chat_id')
@@ -643,88 +636,59 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
                 if trim_chat_id and trim_msg_id:
                     try:
                         await context.bot.copy_message(
-                            chat_id=FREE_CH,
-                            from_chat_id=trim_chat_id,
-                            message_id=trim_msg_id,
-                            caption=caption,
-                            parse_mode='HTML'
+                            chat_id=FREE_CH, from_chat_id=trim_chat_id,
+                            message_id=trim_msg_id, caption=caption, parse_mode='HTML'
                         )
-                    except Exception as e:
-                        logger.error(f"copy_message for trim failed: {e}")
+                    except:
                         await context.bot.send_video(
-                            chat_id=FREE_CH,
-                            video=trim_file_id,
-                            caption=caption,
-                            parse_mode='HTML',
-                            supports_streaming=True
+                            chat_id=FREE_CH, video=trim_file_id,
+                            caption=caption, parse_mode='HTML', supports_streaming=True
                         )
                 else:
                     await context.bot.send_video(
-                        chat_id=FREE_CH,
-                        video=trim_file_id,
-                        caption=caption,
-                        parse_mode='HTML',
-                        supports_streaming=True
+                        chat_id=FREE_CH, video=trim_file_id,
+                        caption=caption, parse_mode='HTML', supports_streaming=True
                     )
             elif trim_type == 'skip':
                 first_video = full_videos[0]
-                thumbnail_sent = False
                 try:
-                    src_chat = first_video['chat_id']
-                    src_msg = first_video['msg_id']
                     await context.bot.copy_message(
-                        chat_id=FREE_CH,
-                        from_chat_id=src_chat,
-                        message_id=src_msg,
-                        caption=caption,
-                        parse_mode='HTML'
+                        chat_id=FREE_CH, from_chat_id=first_video['chat_id'],
+                        message_id=first_video['msg_id'], caption=caption, parse_mode='HTML'
                     )
-                    thumbnail_sent = True
-                except Exception as e:
-                    logger.error(f"Failed to use video as preview: {e}")
-                if not thumbnail_sent:
+                except:
                     await context.bot.send_message(
-                        chat_id=FREE_CH,
-                        text=caption,
-                        parse_mode='HTML'
+                        chat_id=FREE_CH, text=caption, parse_mode='HTML'
                     )
-            logger.info(f"✅ Posted to Free Channel")
     except Exception as e:
-        logger.error(f"❌ Error posting to free channel: {e}")
+        logger.error(f"Free channel error: {e}")
 
     quality_list = "\n".join([f"  • {q['label']} ({q['size']})" for q in qualities_info])
     display_title = generate_display_title(title)
     await status.edit_text(
         f"✅ <b>ALL DONE!</b>\n\n"
         f"🎬 Title: {html_escape(display_title)}\n"
-        f"🆔 Video ID: {vid_id}\n"
+        f"🆔 ID: {vid_id}\n"
         f"🔗 Link: {gplink}\n\n"
-        f"📊 <b>Qualities Saved:</b>\n{quality_list}\n\n"
-        f"🎉 Users ko quality choose karne ka option milega!",
+        f"📊 <b>Qualities:</b>\n{quality_list}",
         parse_mode='HTML'
     )
     context.user_data.clear()
     return ConversationHandler.END
 
 
-# ================= BULK UPLOAD =================
+# ===== BULK UPLOAD =====
 async def start_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ Access Denied!")
         return ConversationHandler.END
     context.user_data.clear()
     context.user_data['bulk_videos'] = {}
-    context.user_data['bulk_count'] = 0
-    context.user_data['bulk_current_title'] = None
     await update.message.reply_text(
         "📦 <b>BULK UPLOAD MODE!</b>\n\n"
-        "🎬 Videos ek-ek karke forward karo.\n\n"
-        "📊 <b>Multi-Quality Support:</b>\n"
-        "  • Same title ki multiple qualities automatically group hongi\n"
-        "  • Alag title = alag video entry\n\n"
-        "📝 <b>Commands:</b>\n"
-        "  • /done - Sab ho gaya, process karo\n"
-        "  • /cancel - Cancel karo\n\n"
+        "🎬 Videos ek-ek karke forward karo.\n"
+        "📊 Same title = same video group\n\n"
+        "📝 /done - Process karo | /cancel - Cancel\n\n"
         "⚡ Pehli video bhejo...",
         parse_mode='HTML'
     )
@@ -741,10 +705,10 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
     if msg.text and msg.text.strip().lower() == '/start':
         context.user_data.clear()
-        await msg.reply_text("🔄 Reset! Use /bulk to start again.")
+        await msg.reply_text("🔄 Reset!")
         return ConversationHandler.END
     if not msg.video and not msg.document:
-        await msg.reply_text("❌ Video file bhejo. Ya /done / /cancel likho.")
+        await msg.reply_text("❌ Video bhejo! Ya /done / /cancel")
         return BULK_WAIT_VIDEO
     raw_caption = msg.caption if msg.caption else ""
     title = clean_title(raw_caption)
@@ -756,24 +720,17 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     duration = (video_obj.duration or 0) if video_obj else 0
     video_data = {
-        'file_id': file_id,
-        'quality_label': quality_label,
-        'width': width,
-        'height': height,
-        'file_size': file_size,
-        'duration': duration,
-        'chat_id': msg.chat_id,
-        'msg_id': msg.message_id
+        'file_id': file_id, 'quality_label': quality_label,
+        'width': width, 'height': height, 'file_size': file_size,
+        'duration': duration, 'chat_id': msg.chat_id, 'msg_id': msg.message_id
     }
     bulk_videos = context.user_data.get('bulk_videos', {})
     if title not in bulk_videos:
         bulk_videos[title] = []
-    existing_qualities = [v['quality_label'] for v in bulk_videos[title]]
-    if quality_label in existing_qualities:
+    existing = [v['quality_label'] for v in bulk_videos[title]]
+    if quality_label in existing:
         await msg.reply_text(
-            f"⚠️ <b>{html_escape(title)}</b>\n"
-            f"Quality <b>{quality_label}</b> already added!\n"
-            f"Different quality bhejo ya agle video pe jao.",
+            f"⚠️ {html_escape(title)}: {quality_label} already added!",
             parse_mode='HTML'
         )
         return BULK_WAIT_VIDEO
@@ -783,17 +740,12 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
     total_files = sum(len(v) for v in bulk_videos.values())
     summary = ""
     for t, vids in bulk_videos.items():
-        display_t = generate_display_title(t)
         q_list = ", ".join([v['quality_label'] for v in vids])
-        summary += f"  📹 {html_escape(display_t)}: {q_list}\n"
+        summary += f"  📹 {html_escape(generate_display_title(t))}: {q_list}\n"
     await msg.reply_text(
-        f"✅ <b>Video Added!</b>\n\n"
-        f"📝 Title: {html_escape(generate_display_title(title))}\n"
-        f"📊 Quality: {quality_label} ({format_file_size(file_size)})\n\n"
-        f"📋 <b>Summary ({total_titles} videos, {total_files} files):</b>\n"
-        f"{summary}\n"
-        f"📹 Aur bhejo ya /done likho\n"
-        f"❌ Cancel: /cancel",
+        f"✅ <b>Added!</b> {html_escape(generate_display_title(title))}: {quality_label}\n\n"
+        f"📋 <b>Summary ({total_titles} videos, {total_files} files):</b>\n{summary}\n"
+        f"📹 Aur bhejo ya /done\n❌ /cancel",
         parse_mode='HTML'
     )
     return BULK_WAIT_VIDEO
@@ -803,12 +755,12 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
     msg = update.message
     bulk_videos = context.user_data.get('bulk_videos', {})
     if not bulk_videos:
-        await msg.reply_text("❌ Koi video nahi mili! Videos bhejo phir /done likho.")
+        await msg.reply_text("❌ Koi video nahi! Bhejo phir /done.")
         return BULK_WAIT_VIDEO
     total_titles = len(bulk_videos)
     total_files = sum(len(v) for v in bulk_videos.values())
     status = await msg.reply_text(
-        f"⏳ <b>Processing {total_titles} videos ({total_files} files)...</b>",
+        f"⏳ Processing {total_titles} videos ({total_files} files)...",
         parse_mode='HTML'
     )
     processed = 0
@@ -816,7 +768,7 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
     for title, video_list in bulk_videos.items():
         processed += 1
         await status.edit_text(
-            f"⏳ Processing {processed}/{total_titles}: {html_escape(generate_display_title(title))}...",
+            f"⏳ {processed}/{total_titles}: {html_escape(generate_display_title(title))}...",
             parse_mode='HTML'
         )
         conn = None
@@ -824,15 +776,12 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO adult_videos (title) VALUES (%s) RETURNING vid_id",
-                (title,)
-            )
+            cur.execute("INSERT INTO adult_videos (title) VALUES (%s) RETURNING vid_id", (title,))
             vid_id = cur.fetchone()[0]
             conn.commit()
             cur.close()
         except Exception as e:
-            logger.error(f"❌ DB error for '{title}': {e}")
+            logger.error(f"DB error '{title}': {e}")
             results.append(f"❌ {generate_display_title(title)}: DB Error")
             continue
         finally:
@@ -846,23 +795,17 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             if BACKUP_1 != 0:
                 try:
                     copied = await context.bot.copy_message(
-                        chat_id=BACKUP_1,
-                        from_chat_id=vdata['chat_id'],
-                        message_id=vdata['msg_id'],
-                        caption=backup_caption,
-                        parse_mode='HTML'
+                        chat_id=BACKUP_1, from_chat_id=vdata['chat_id'],
+                        message_id=vdata['msg_id'], caption=backup_caption, parse_mode='HTML'
                     )
                     backup_msg_id = copied.message_id
                 except Exception as e:
-                    logger.error(f"Backup1 error for {title} {q_label}: {e}")
+                    logger.error(f"Backup1 error {title} {q_label}: {e}")
             for ch_id in [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]:
                 try:
                     await context.bot.copy_message(
-                        chat_id=ch_id,
-                        from_chat_id=vdata['chat_id'],
-                        message_id=vdata['msg_id'],
-                        caption=backup_caption,
-                        parse_mode='HTML'
+                        chat_id=ch_id, from_chat_id=vdata['chat_id'],
+                        message_id=vdata['msg_id'], caption=backup_caption, parse_mode='HTML'
                     )
                 except Exception as e:
                     logger.error(f"Channel {ch_id} error: {e}")
@@ -874,7 +817,7 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
                     """INSERT INTO video_qualities
                        (vid_id, quality_label, file_id, file_size, width, height,
                         duration, backup_msg_id, backup_channel_id)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (vid_id, q_label, vdata['file_id'], vdata['file_size'],
                      vdata['width'], vdata['height'], vdata['duration'],
                      backup_msg_id, BACKUP_1)
@@ -886,10 +829,7 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             finally:
                 if conn2:
                     db_pool.putconn(conn2)
-            qualities_info.append({
-                'label': q_label,
-                'size': format_file_size(vdata['file_size'])
-            })
+            qualities_info.append({'label': q_label, 'size': format_file_size(vdata['file_size'])})
         web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
         gplink = await shorten_link(web_link)
         caption = build_free_channel_caption(title, gplink, qualities_info)
@@ -897,31 +837,24 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             first_vid = video_list[0]
             try:
                 await context.bot.copy_message(
-                    chat_id=FREE_CH,
-                    from_chat_id=first_vid['chat_id'],
-                    message_id=first_vid['msg_id'],
-                    caption=caption,
-                    parse_mode='HTML'
+                    chat_id=FREE_CH, from_chat_id=first_vid['chat_id'],
+                    message_id=first_vid['msg_id'], caption=caption, parse_mode='HTML'
                 )
-            except Exception as e:
-                logger.error(f"Free channel error: {e}")
+            except:
                 try:
                     await context.bot.send_video(
-                        chat_id=FREE_CH,
-                        video=first_vid['file_id'],
-                        caption=caption,
-                        parse_mode='HTML',
-                        supports_streaming=True
+                        chat_id=FREE_CH, video=first_vid['file_id'],
+                        caption=caption, parse_mode='HTML', supports_streaming=True
                     )
                 except Exception as e2:
-                    logger.error(f"Fallback also failed: {e2}")
+                    logger.error(f"Fallback failed: {e2}")
         q_str = ", ".join([q['label'] for q in qualities_info])
         results.append(f"✅ {generate_display_title(title)}: {q_str}")
         await asyncio.sleep(1)
     result_text = "\n".join(results)
     await status.edit_text(
-        f"🎉 <b>BULK UPLOAD COMPLETE!</b>\n\n"
-        f"📊 Total: {total_titles} videos, {total_files} files\n\n"
+        f"🎉 <b>BULK COMPLETE!</b>\n\n"
+        f"📊 {total_titles} videos, {total_files} files\n\n"
         f"<b>Results:</b>\n{result_text}",
         parse_mode='HTML'
     )
@@ -929,18 +862,34 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
-async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("❌ Process cancelled.")
+    await update.message.reply_text("❌ Cancelled.")
     return ConversationHandler.END
 
 
-# ================= PROVIDER BOT: START & VIDEO DELIVERY =================
+# ================================================================
+#            PROVIDER BOT (USER-FACING) - ALL HANDLERS
+# ================================================================
+
 async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Provider Bot /start handler.
+    - If vid_ID: show video/quality selection
+    - If normal /start: show USER welcome menu with buttons
+    """
+    # ALWAYS clear payment state on /start
+    context.user_data.pop('payment_step', None)
+    context.user_data.pop('screenshot_id', None)
+
     text = update.message.text
     chat_id = update.effective_chat.id
-    user_name = update.effective_user.first_name
+    user = update.effective_user
+    user_name = user.first_name
 
+    logger.info(f"👤 Provider /start from user {user.id} ({user_name}): {text}")
+
+    # ===== VIDEO LINK HANDLING =====
     if text and "vid_" in text:
         try:
             vid_id = int(text.split("vid_")[1])
@@ -950,17 +899,14 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 conn = get_db_connection()
                 cur = conn.cursor()
-                cur.execute(
-                    "SELECT title FROM adult_videos WHERE vid_id = %s", (vid_id,)
-                )
+                cur.execute("SELECT title FROM adult_videos WHERE vid_id = %s", (vid_id,))
                 video_result = cur.fetchone()
                 if video_result:
                     title = video_result[0]
                     cur.execute(
                         """SELECT quality_id, quality_label, file_id, file_size,
                                   backup_msg_id, backup_channel_id
-                           FROM video_qualities
-                           WHERE vid_id = %s
+                           FROM video_qualities WHERE vid_id = %s
                            ORDER BY file_size DESC""",
                         (vid_id,)
                     )
@@ -972,32 +918,30 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not title:
                 await update.message.reply_text(
-                    "❌ Video Not Found!\n\n"
-                    "Yeh video delete ho chuki hai ya invalid link hai.\n"
-                    "Naya link free channel se lein."
+                    "❌ Video Not Found!\n\nYeh video delete ho chuki hai ya invalid link hai."
                 )
                 return
             if not qualities:
-                await update.message.reply_text(
-                    "❌ No video files found for this entry.\n"
-                    "Please contact admin."
-                )
+                await update.message.reply_text("❌ No video files found. Contact admin.")
                 return
 
+            # Single quality - send directly
             if len(qualities) == 1:
                 await send_video_to_user(
                     update, context, chat_id, user_name, title, qualities[0]
                 )
                 return
 
+            # Multiple qualities - show selection
             keyboard = []
             for q in qualities:
                 q_id, q_label, file_id, file_size, backup_msg_id, backup_ch = q
                 size_str = format_file_size(file_size)
-                btn_text = f"📹 {q_label} ({size_str})"
-                callback_data = f"quality_{vid_id}_{q_id}"
                 keyboard.append(
-                    [InlineKeyboardButton(btn_text, callback_data=callback_data)]
+                    [InlineKeyboardButton(
+                        f"📹 {q_label} ({size_str})",
+                        callback_data=f"quality_{vid_id}_{q_id}"
+                    )]
                 )
             keyboard.append(
                 [InlineKeyboardButton(
@@ -1005,12 +949,10 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     callback_data=f"allquality_{vid_id}"
                 )]
             )
-            safe_title = html_escape(title)
             await update.message.reply_text(
                 f"👋 Hello <b>{html_escape(user_name)}</b>!\n\n"
-                f"🎬 <b>{safe_title}</b>\n\n"
-                f"📊 <b>Select Quality:</b>\n"
-                f"Choose your preferred quality below.\n\n"
+                f"🎬 <b>{html_escape(title)}</b>\n\n"
+                f"📊 <b>Select Quality:</b>\n\n"
                 f"⚠️ Videos auto-delete after 5 minutes!\n"
                 f"💾 Forward to Saved Messages immediately!",
                 parse_mode='HTML',
@@ -1019,385 +961,106 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("❌ Invalid video ID.")
         except Exception as e:
-            logger.error(f"Provider Bot Error: {e}")
-            await update.message.reply_text("❌ Something went wrong. Please try again.")
-    else:
-        # ===== NEW START MENU WITH SUBSCRIPTION =====
-        keyboard = [
-            [InlineKeyboardButton(
-                f"💎 Buy Subscription ({SUBSCRIPTION_AMOUNT}₹/Month)",
-                callback_data="buy_sub"
-            )],
-            [InlineKeyboardButton("🆓 Join Free Channel", url=FREE_CHANNEL_LINK)],
-            [InlineKeyboardButton("👨‍💻 Contact Admin", url="https://t.me/ownermahi")]
-        ]
+            logger.error(f"Provider Error: {e}")
+            await update.message.reply_text("❌ Something went wrong. Try again.")
+        return
 
-        # Check if user already has active subscription
-        sub_status = ""
-        conn = None
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT end_date FROM subscribers WHERE user_id = %s",
-                (update.effective_user.id,)
-            )
-            sub_result = cur.fetchone()
-            cur.close()
-            if sub_result and sub_result[0]:
-                end_date = sub_result[0]
-                if end_date > datetime.now():
-                    remaining = (end_date - datetime.now()).days
-                    sub_status = (
-                        f"\n\n✅ <b>Active Subscription!</b>\n"
-                        f"📅 Expires: {end_date.strftime('%d-%m-%Y')}\n"
-                        f"⏳ {remaining} days remaining"
-                    )
-                else:
-                    sub_status = "\n\n⚠️ <b>Subscription Expired!</b> Renew karo neeche se 👇"
-        except Exception as e:
-            logger.error(f"Sub check error: {e}")
-        finally:
-            if conn:
-                db_pool.putconn(conn)
-
-        await update.message.reply_text(
-            f"🔞 <b>Welcome {html_escape(user_name)}!</b>\n\n"
-            f"🎬 Premium aur Direct Videos ke liye VIP join karein "
-            f"sirf {SUBSCRIPTION_AMOUNT}₹/month mein.\n\n"
-            f"📌 <b>Features:</b>\n"
-            f"  • Direct video files without ads\n"
-            f"  • All qualities available\n"
-            f"  • Priority support\n"
-            f"{sub_status}\n\n"
-            f"👇 Neeche diye gaye buttons ka use karein:",
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
+    # ===== NORMAL /start - USER WELCOME MENU =====
+    sub_status = ""
+    is_active, end_date = check_active_subscription(user.id)
+    if is_active and end_date:
+        remaining = (end_date - datetime.now()).days
+        sub_status = (
+            f"\n\n✅ <b>Active Subscription!</b>\n"
+            f"📅 Expires: {end_date.strftime('%d-%m-%Y')}\n"
+            f"⏳ {remaining} days remaining"
         )
+    elif end_date:
+        sub_status = "\n\n⚠️ <b>Subscription Expired!</b> Renew karo neeche se 👇"
+
+    keyboard = [
+        [InlineKeyboardButton(
+            f"💎 Buy VIP ({SUBSCRIPTION_AMOUNT}₹/Month)",
+            callback_data="buy_sub"
+        )],
+        [InlineKeyboardButton("🆓 Free Channel", url=FREE_CHANNEL_LINK)],
+        [InlineKeyboardButton("👨‍💻 Contact Admin", url="https://t.me/ownermahi")]
+    ]
+
+    await update.message.reply_text(
+        f"🔞 <b>Welcome {html_escape(user_name)}!</b>\n\n"
+        f"🎬 Premium Videos sirf {SUBSCRIPTION_AMOUNT}₹/month mein.\n\n"
+        f"📌 <b>Features:</b>\n"
+        f"  • Direct video files without ads\n"
+        f"  • All qualities available\n"
+        f"  • Priority support"
+        f"{sub_status}\n\n"
+        f"👇 Neeche buttons use karein:",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 
-# ================= PAYMENT FLOW =================
-async def handle_buy_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def provider_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel payment flow"""
+    context.user_data.pop('payment_step', None)
+    context.user_data.pop('screenshot_id', None)
+    await update.message.reply_text(
+        "❌ <b>Cancelled!</b>\n\nDobara /start type karein.",
+        parse_mode='HTML'
+    )
+
+
+async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    SINGLE callback handler for ALL provider bot buttons.
+    Routes based on callback_data prefix.
+    """
     query = update.callback_query
     await query.answer()
+    data = query.data
+    chat_id = query.message.chat_id
+    user = query.from_user
+    user_name = user.first_name
 
-    if query.data == "buy_sub":
-        # Check if already subscribed
-        conn = None
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT end_date FROM subscribers WHERE user_id = %s",
-                (query.from_user.id,)
+    logger.info(f"📲 Callback from {user.id}: {data}")
+
+    # ========== BUY SUBSCRIPTION ==========
+    if data == "buy_sub":
+        # Check existing subscription
+        is_active, end_date = check_active_subscription(user.id)
+        if is_active and end_date:
+            remaining = (end_date - datetime.now()).days
+            await query.message.reply_text(
+                f"✅ <b>Tumhari subscription already active hai!</b>\n\n"
+                f"📅 Expires: {end_date.strftime('%d-%m-%Y')}\n"
+                f"⏳ {remaining} days remaining",
+                parse_mode='HTML'
             )
-            sub_result = cur.fetchone()
-            cur.close()
-            if sub_result and sub_result[0] and sub_result[0] > datetime.now():
-                remaining = (sub_result[0] - datetime.now()).days
-                await query.message.reply_text(
-                    f"✅ <b>Tumhari subscription already active hai!</b>\n\n"
-                    f"📅 Expires: {sub_result[0].strftime('%d-%m-%Y')}\n"
-                    f"⏳ {remaining} days remaining\n\n"
-                    f"Renew karne ki zaroorat nahi hai abhi.",
-                    parse_mode='HTML'
-                )
-                return ConversationHandler.END
-        except Exception as e:
-            logger.error(f"Sub check error: {e}")
-        finally:
-            if conn:
-                db_pool.putconn(conn)
+            return
+
+        # Set payment state
+        context.user_data['payment_step'] = 'screenshot'
 
         await query.message.reply_text(
             f"💎 <b>VIP Subscription - {SUBSCRIPTION_AMOUNT}₹ / Month</b>\n\n"
             f"💳 <b>UPI ID:</b> <code>{UPI_ID}</code>\n\n"
             f"⚠️ <b>Steps:</b>\n"
-            f"1️⃣ Upar diye gaye UPI par {SUBSCRIPTION_AMOUNT}₹ pay karein.\n"
-            f"2️⃣ Payment successful hone ke baad yahan <b>Screenshot</b> bhejein.\n"
-            f"3️⃣ Phir UTR/Reference Number bhejein.\n"
+            f"1️⃣ Upar diye gaye UPI par {SUBSCRIPTION_AMOUNT}₹ pay karein\n"
+            f"2️⃣ Payment ka <b>Screenshot</b> yahan bhejein\n"
+            f"3️⃣ Phir <b>UTR/Reference Number</b> bhejein\n"
             f"4️⃣ Admin verify karke VIP link bhejega!\n\n"
-            f"📸 <b>Ab payment screenshot bhejo...</b>\n\n"
-            f"❌ Cancel karne ke liye /cancel type karein.",
+            f"📸 <b>Ab payment screenshot (photo) bhejo...</b>\n\n"
+            f"❌ Cancel: /cancel",
             parse_mode='HTML'
         )
-        return PAY_SCREENSHOT
-
-
-async def receive_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-
-    if not msg.photo:
-        await msg.reply_text(
-            "❌ Kripya payment ka <b>Screenshot (Photo)</b> bhejein.\n\n"
-            "📸 Photo format mein screenshot bhejo.\n"
-            "❌ Cancel: /cancel",
-            parse_mode='HTML'
-        )
-        return PAY_SCREENSHOT
-
-    context.user_data['screenshot_id'] = msg.photo[-1].file_id
-
-    await msg.reply_text(
-        "✅ <b>Screenshot Received!</b>\n\n"
-        "🔢 Ab kripya apna <b>12-digit UTR ya Reference Number</b> "
-        "type karke bhejein.\n\n"
-        "💡 UTR number payment confirmation SMS ya app mein milta hai.\n\n"
-        "❌ Cancel: /cancel",
-        parse_mode='HTML'
-    )
-    return PAY_UTR
-
-
-async def receive_utr(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    utr_number = msg.text.strip()
-
-    if len(utr_number) < 4:
-        await msg.reply_text(
-            "❌ UTR number bahut chota hai. Kripya sahi UTR/Reference number bhejein.\n"
-            "❌ Cancel: /cancel"
-        )
-        return PAY_UTR
-
-    screenshot_id = context.user_data.get('screenshot_id')
-    user = update.effective_user
-
-    # Admin ko approval message bhejna
-    admin_keyboard = [
-        [
-            InlineKeyboardButton(
-                "✅ Approve (30 Days)",
-                callback_data=f"approve_{user.id}_30"
-            ),
-            InlineKeyboardButton(
-                "❌ Reject",
-                callback_data=f"reject_{user.id}"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "✅ Approve (7 Days - Trial)",
-                callback_data=f"approve_{user.id}_7"
-            )
-        ]
-    ]
-
-    username_text = f"@{user.username}" if user.username else "N/A"
-
-    try:
-        await context.bot.send_photo(
-            chat_id=ADMIN_USER_ID,
-            photo=screenshot_id,
-            caption=(
-                f"🔔 <b>NEW PAYMENT PENDING</b>\n\n"
-                f"👤 Name: {html_escape(user.first_name)}\n"
-                f"🆔 User ID: <code>{user.id}</code>\n"
-                f"📱 Username: {username_text}\n"
-                f"🔢 UTR: <code>{utr_number}</code>\n"
-                f"💰 Amount: {SUBSCRIPTION_AMOUNT}₹\n"
-                f"📅 Date: {datetime.now().strftime('%d-%m-%Y %H:%M')}\n\n"
-                f"👇 Verify karke approve/reject karein:"
-            ),
-            parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(admin_keyboard)
-        )
-        logger.info(f"✅ Payment request sent to admin from user {user.id}")
-    except Exception as e:
-        logger.error(f"❌ Failed to send payment to admin: {e}")
-        await msg.reply_text(
-            "❌ Error sending request. Please try again or contact @ownermahi"
-        )
-        context.user_data.clear()
-        return ConversationHandler.END
-
-    await msg.reply_text(
-        "⏳ <b>Verification Pending!</b>\n\n"
-        "✅ Tumhari payment details admin ko bhej di gayi hain.\n"
-        "🕒 Admin verify karte hi tumhe VIP group ka link mil jayega.\n\n"
-        "⏱️ Usually 5-30 minutes lagta hai verify hone mein.\n\n"
-        "❓ Koi problem ho toh @ownermahi ko DM karo.",
-        parse_mode='HTML'
-    )
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
-async def cancel_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text(
-        "❌ <b>Payment process cancelled.</b>\n\n"
-        "Dobara subscribe karne ke liye /start type karein.",
-        parse_mode='HTML'
-    )
-    return ConversationHandler.END
-
-
-async def payment_fallback_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start during payment conversation."""
-    context.user_data.clear()
-    text = update.message.text
-    if text and "vid_" in text:
-        await provider_start(update, context)
-    else:
-        await update.message.reply_text(
-            "❌ Payment process cancelled.\n"
-            "Naya /start menu load ho raha hai..."
-        )
-        await provider_start(update, context)
-    return ConversationHandler.END
-
-
-# ================= ADMIN PAYMENT APPROVAL/REJECTION =================
-async def admin_payment_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    # Only admin can approve/reject
-    if query.from_user.id != ADMIN_USER_ID:
-        await query.answer("❌ Only admin can do this!", show_alert=True)
         return
 
-    data = query.data
-
-    if data.startswith("approve_"):
-        parts = data.split("_")
-        user_id = int(parts[1])
-        days = int(parts[2])
-
-        end_date = datetime.now() + timedelta(days=days)
-
-        # Database mein subscriber add/update karna
-        conn = None
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO subscribers (user_id, end_date, notified)
-                VALUES (%s, %s, FALSE)
-                ON CONFLICT (user_id)
-                DO UPDATE SET end_date = %s, notified = FALSE, start_date = CURRENT_TIMESTAMP
-            """, (user_id, end_date, end_date))
-            conn.commit()
-            cur.close()
-            logger.info(f"✅ Subscriber {user_id} approved for {days} days")
-        except Exception as e:
-            logger.error(f"❌ DB error approving subscriber: {e}")
-            await query.edit_message_caption(
-                caption=query.message.caption + f"\n\n❌ <b>DB ERROR:</b> {e}",
-                parse_mode='HTML'
-            )
-            return
-        finally:
-            if conn:
-                db_pool.putconn(conn)
-
-        # Admin message update karna
-        await query.edit_message_caption(
-            caption=query.message.caption + (
-                f"\n\n✅ <b>APPROVED</b> for {days} days!\n"
-                f"📅 Valid till: {end_date.strftime('%d-%m-%Y')}"
-            ),
-            parse_mode='HTML'
-        )
-
-        # User ko single-use invite link generate karke bhejna
-        try:
-            if PAID_CH != 0:
-                invite_link = await context.bot.create_chat_invite_link(
-                    chat_id=PAID_CH,
-                    member_limit=1,
-                    expire_date=datetime.now() + timedelta(days=1),
-                    name=f"VIP-{user_id}-{days}d"
-                )
-
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        f"🎉 <b>Payment Approved! Subscription Activated!</b>\n\n"
-                        f"📅 <b>Plan:</b> {days} Days VIP\n"
-                        f"📅 <b>Valid Till:</b> {end_date.strftime('%d-%m-%Y')}\n\n"
-                        f"👇 <b>VIP Group Join Link:</b>\n"
-                        f"{invite_link.invite_link}\n\n"
-                        f"⚠️ <b>Important:</b>\n"
-                        f"  • Yeh link sirf EK BAAR kaam karega\n"
-                        f"  • Link 24 ghante mein expire ho jayega\n"
-                        f"  • Jaldi join kar lein!\n\n"
-                        f"🙏 Thank you for subscribing!"
-                    ),
-                    parse_mode='HTML'
-                )
-                logger.info(f"✅ Invite link sent to user {user_id}")
-            else:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        f"🎉 <b>Payment Approved!</b>\n\n"
-                        f"📅 Plan: {days} Days VIP\n"
-                        f"📅 Valid Till: {end_date.strftime('%d-%m-%Y')}\n\n"
-                        f"Admin se VIP channel ka link lein: @ownermahi"
-                    ),
-                    parse_mode='HTML'
-                )
-
-        except Exception as e:
-            logger.error(f"❌ Invite link error for user {user_id}: {e}")
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_USER_ID,
-                    text=(
-                        f"⚠️ <b>Invite Link Error!</b>\n\n"
-                        f"User: <code>{user_id}</code>\n"
-                        f"Error: {e}\n\n"
-                        f"Manually invite link bhejo user ko."
-                    ),
-                    parse_mode='HTML'
-                )
-            except:
-                pass
-
-    elif data.startswith("reject_"):
-        user_id = int(data.split("_")[1])
-
-        await query.edit_message_caption(
-            caption=query.message.caption + "\n\n❌ <b>REJECTED</b>",
-            parse_mode='HTML'
-        )
-
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "❌ <b>Payment Rejected!</b>\n\n"
-                    "Tumhara screenshot ya UTR invalid tha.\n\n"
-                    "📌 <b>Possible Reasons:</b>\n"
-                    "  • Screenshot clear nahi tha\n"
-                    "  • UTR number galat tha\n"
-                    "  • Payment amount galat tha\n\n"
-                    "🔁 Dobara try karne ke liye /start type karein.\n"
-                    "❓ Agar koi problem hai toh @ownermahi ko message karo."
-                ),
-                parse_mode='HTML'
-            )
-            logger.info(f"✅ Rejection notification sent to user {user_id}")
-        except Exception as e:
-            logger.error(f"❌ Failed to notify rejected user {user_id}: {e}")
-
-
-# ================= QUALITY SELECTION CALLBACK =================
-async def handle_quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-    chat_id = query.message.chat_id
-    user_name = query.from_user.first_name
-
+    # ========== QUALITY SELECTION ==========
     if data.startswith("quality_"):
         parts = data.split("_")
         vid_id = int(parts[1])
         quality_id = int(parts[2])
-
         conn = None
         try:
             conn = get_db_connection()
@@ -1416,24 +1079,21 @@ async def handle_quality_callback(update: Update, context: ContextTypes.DEFAULT_
         finally:
             if conn:
                 db_pool.putconn(conn)
-
         if not quality:
             await query.edit_message_text("❌ Quality not found!")
             return
-
         try:
             await query.message.delete()
         except:
             pass
-
         await send_video_to_user(
-            update, context, chat_id, user_name, title,
-            quality, is_callback=True
+            update, context, chat_id, user_name, title, quality, is_callback=True
         )
+        return
 
-    elif data.startswith("allquality_"):
+    # ========== ALL QUALITIES ==========
+    if data.startswith("allquality_"):
         vid_id = int(data.split("_")[1])
-
         conn = None
         try:
             conn = get_db_connection()
@@ -1444,8 +1104,7 @@ async def handle_quality_callback(update: Update, context: ContextTypes.DEFAULT_
             cur.execute(
                 """SELECT quality_id, quality_label, file_id, file_size,
                           backup_msg_id, backup_channel_id
-                   FROM video_qualities WHERE vid_id = %s
-                   ORDER BY file_size ASC""",
+                   FROM video_qualities WHERE vid_id = %s ORDER BY file_size ASC""",
                 (vid_id,)
             )
             qualities = cur.fetchall()
@@ -1453,16 +1112,13 @@ async def handle_quality_callback(update: Update, context: ContextTypes.DEFAULT_
         finally:
             if conn:
                 db_pool.putconn(conn)
-
         if not qualities:
             await query.edit_message_text("❌ No qualities found!")
             return
-
         try:
             await query.message.delete()
         except:
             pass
-
         sent_msg_ids = []
         for quality in qualities:
             msg_id = await send_video_to_user(
@@ -1472,16 +1128,232 @@ async def handle_quality_callback(update: Update, context: ContextTypes.DEFAULT_
             if msg_id:
                 sent_msg_ids.append(msg_id)
             await asyncio.sleep(1)
-
         if sent_msg_ids:
             asyncio.create_task(
                 auto_delete_with_notification(
-                    context=context,
-                    chat_id=chat_id,
-                    message_ids_to_delete=sent_msg_ids,
-                    delete_time=AUTO_DELETE_TIME
+                    context=context, chat_id=chat_id,
+                    message_ids_to_delete=sent_msg_ids, delete_time=AUTO_DELETE_TIME
                 )
             )
+        return
+
+    # ========== ADMIN: APPROVE PAYMENT ==========
+    if data.startswith("approve_"):
+        if user.id != ADMIN_USER_ID:
+            await query.answer("❌ Only admin!", show_alert=True)
+            return
+        parts = data.split("_")
+        target_user_id = int(parts[1])
+        days = int(parts[2])
+        end_date = datetime.now() + timedelta(days=days)
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO subscribers (user_id, end_date, notified)
+                VALUES (%s, %s, FALSE)
+                ON CONFLICT (user_id)
+                DO UPDATE SET end_date = %s, notified = FALSE, start_date = CURRENT_TIMESTAMP
+            """, (target_user_id, end_date, end_date))
+            conn.commit()
+            cur.close()
+            logger.info(f"✅ Subscriber {target_user_id} approved for {days} days")
+        except Exception as e:
+            logger.error(f"DB approve error: {e}")
+            await query.edit_message_caption(
+                caption=query.message.caption + f"\n\n❌ DB ERROR: {e}",
+                parse_mode='HTML'
+            )
+            return
+        finally:
+            if conn:
+                db_pool.putconn(conn)
+        await query.edit_message_caption(
+            caption=query.message.caption + (
+                f"\n\n✅ <b>APPROVED</b> for {days} days!\n"
+                f"📅 Till: {end_date.strftime('%d-%m-%Y')}"
+            ),
+            parse_mode='HTML'
+        )
+        # Send invite link to user
+        try:
+            if PAID_CH != 0:
+                invite_link = await context.bot.create_chat_invite_link(
+                    chat_id=PAID_CH, member_limit=1,
+                    expire_date=datetime.now() + timedelta(days=1),
+                    name=f"VIP-{target_user_id}"
+                )
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text=(
+                        f"🎉 <b>Payment Approved!</b>\n\n"
+                        f"📅 Plan: {days} Days VIP\n"
+                        f"📅 Valid Till: {end_date.strftime('%d-%m-%Y')}\n\n"
+                        f"👇 <b>VIP Group Join Link:</b>\n"
+                        f"{invite_link.invite_link}\n\n"
+                        f"⚠️ Link sirf EK BAAR kaam karega. 24hr mein expire hoga.\n\n"
+                        f"🙏 Thank you!"
+                    ),
+                    parse_mode='HTML'
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=target_user_id,
+                    text=(
+                        f"🎉 <b>Payment Approved!</b>\n\n"
+                        f"📅 Plan: {days} Days VIP\n"
+                        f"Admin se link lein: @ownermahi"
+                    ),
+                    parse_mode='HTML'
+                )
+        except Exception as e:
+            logger.error(f"Invite link error: {e}")
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_USER_ID,
+                    text=f"⚠️ User <code>{target_user_id}</code> ko link bhejne mein error: {e}",
+                    parse_mode='HTML'
+                )
+            except:
+                pass
+        return
+
+    # ========== ADMIN: REJECT PAYMENT ==========
+    if data.startswith("reject_"):
+        if user.id != ADMIN_USER_ID:
+            await query.answer("❌ Only admin!", show_alert=True)
+            return
+        target_user_id = int(data.split("_")[1])
+        await query.edit_message_caption(
+            caption=query.message.caption + "\n\n❌ <b>REJECTED</b>",
+            parse_mode='HTML'
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=(
+                    "❌ <b>Payment Rejected!</b>\n\n"
+                    "Screenshot ya UTR invalid tha.\n\n"
+                    "🔁 Dobara try: /start\n"
+                    "❓ Help: @ownermahi"
+                ),
+                parse_mode='HTML'
+            )
+        except:
+            pass
+        return
+
+
+async def provider_handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photos sent to provider bot (payment screenshots)"""
+    msg = update.message
+    payment_step = context.user_data.get('payment_step')
+
+    if payment_step == 'screenshot':
+        # User is sending payment screenshot
+        context.user_data['screenshot_id'] = msg.photo[-1].file_id
+        context.user_data['payment_step'] = 'utr'
+
+        await msg.reply_text(
+            "✅ <b>Screenshot Received!</b>\n\n"
+            "🔢 Ab <b>UTR ya Reference Number</b> type karke bhejein.\n\n"
+            "💡 UTR number payment SMS ya app mein milta hai.\n\n"
+            "❌ Cancel: /cancel",
+            parse_mode='HTML'
+        )
+        return
+
+    # Normal photo (not in payment flow) - ignore or reply
+    await msg.reply_text(
+        "📸 Photo received, lekin koi active process nahi hai.\n\n"
+        "👉 /start type karein menu dekhne ke liye."
+    )
+
+
+async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle text messages sent to provider bot (UTR number)"""
+    msg = update.message
+    payment_step = context.user_data.get('payment_step')
+
+    if payment_step == 'utr':
+        # User is sending UTR number
+        utr_number = msg.text.strip()
+
+        if len(utr_number) < 4:
+            await msg.reply_text(
+                "❌ UTR number bahut chota hai. Sahi UTR bhejein.\n❌ Cancel: /cancel"
+            )
+            return
+
+        screenshot_id = context.user_data.get('screenshot_id')
+        user = update.effective_user
+        username_text = f"@{user.username}" if user.username else "N/A"
+
+        # Send to admin for approval
+        admin_keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve (30 Days)", callback_data=f"approve_{user.id}_30"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user.id}")
+            ],
+            [
+                InlineKeyboardButton("✅ Approve (7 Days Trial)", callback_data=f"approve_{user.id}_7")
+            ]
+        ]
+
+        try:
+            await context.bot.send_photo(
+                chat_id=ADMIN_USER_ID,
+                photo=screenshot_id,
+                caption=(
+                    f"🔔 <b>NEW PAYMENT PENDING</b>\n\n"
+                    f"👤 Name: {html_escape(user.first_name)}\n"
+                    f"🆔 ID: <code>{user.id}</code>\n"
+                    f"📱 Username: {username_text}\n"
+                    f"🔢 UTR: <code>{utr_number}</code>\n"
+                    f"💰 Amount: {SUBSCRIPTION_AMOUNT}₹\n"
+                    f"📅 Date: {datetime.now().strftime('%d-%m-%Y %H:%M')}\n\n"
+                    f"👇 Verify karke approve/reject karein:"
+                ),
+                parse_mode='HTML',
+                reply_markup=InlineKeyboardMarkup(admin_keyboard)
+            )
+        except Exception as e:
+            logger.error(f"Failed to send payment to admin: {e}")
+            await msg.reply_text("❌ Error! Please try again or contact @ownermahi")
+            context.user_data.pop('payment_step', None)
+            context.user_data.pop('screenshot_id', None)
+            return
+
+        await msg.reply_text(
+            "⏳ <b>Verification Pending!</b>\n\n"
+            "✅ Payment details admin ko bhej di gayi.\n"
+            "🕒 Admin verify karte hi VIP link mil jayega.\n\n"
+            "⏱️ Usually 5-30 minutes lagta hai.\n\n"
+            "❓ Problem? @ownermahi",
+            parse_mode='HTML'
+        )
+
+        # Clear payment state
+        context.user_data.pop('payment_step', None)
+        context.user_data.pop('screenshot_id', None)
+        return
+
+    if payment_step == 'screenshot':
+        # User sent text instead of photo
+        await msg.reply_text(
+            "❌ Photo chahiye! Payment ka <b>Screenshot (photo)</b> bhejein.\n\n"
+            "❌ Cancel: /cancel",
+            parse_mode='HTML'
+        )
+        return
+
+    # Normal text (not in payment flow)
+    await msg.reply_text(
+        "🤔 Samajh nahi aaya.\n\n"
+        "👉 /start type karein menu dekhne ke liye.\n"
+        "👉 Video ke liye free channel ka link use karein."
+    )
 
 
 async def send_video_to_user(update, context, chat_id, user_name, title,
@@ -1495,10 +1367,9 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
             text=(
                 f"👋 Hello {user_name}!\n\n"
                 f"📊 Quality: {q_label} ({size_str})\n\n"
-                "⚠️ IMPORTANT:\n"
-                "🕒 Video 5 minutes baad auto-delete hogi.\n"
-                "💾 Saved Messages mein forward kar lena!\n\n"
-                "⏳ Video bhej rahe hain..."
+                "⚠️ Video 5 min baad auto-delete hogi.\n"
+                "💾 Saved Messages mein forward kar lo!\n\n"
+                "⏳ Sending..."
             )
         )
         await asyncio.sleep(2)
@@ -1522,32 +1393,28 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
     if backup_msg_id and backup_ch and backup_ch != 0:
         try:
             copied = await context.bot.copy_message(
-                chat_id=chat_id,
-                from_chat_id=backup_ch,
-                message_id=backup_msg_id,
-                caption=caption_text
+                chat_id=chat_id, from_chat_id=backup_ch,
+                message_id=backup_msg_id, caption=caption_text
             )
             sent_msg_id = copied.message_id
-            logger.info(f"✅ Sent {q_label} to user {chat_id} via copy_message")
+            logger.info(f"✅ Sent {q_label} to {chat_id} via copy")
         except Exception as e:
-            logger.error(f"copy_message failed for {q_label}: {e}")
+            logger.error(f"copy failed {q_label}: {e}")
 
     if not sent_msg_id:
         try:
             fallback = await context.bot.send_video(
-                chat_id=chat_id,
-                video=file_id,
-                caption=caption_text,
-                supports_streaming=True
+                chat_id=chat_id, video=file_id,
+                caption=caption_text, supports_streaming=True
             )
             sent_msg_id = fallback.message_id
-            logger.info(f"✅ Sent {q_label} to user {chat_id} via file_id")
+            logger.info(f"✅ Sent {q_label} to {chat_id} via file_id")
         except Exception as e:
-            logger.error(f"Fallback send failed for {q_label}: {e}")
+            logger.error(f"Fallback failed {q_label}: {e}")
             try:
                 await context.bot.send_message(
                     chat_id=chat_id,
-                    text=f"❌ Error sending {q_label} quality video. Please try again."
+                    text=f"❌ Error sending {q_label} video. Try again."
                 )
             except:
                 pass
@@ -1558,180 +1425,143 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
     if sent_msg_id:
         asyncio.create_task(
             auto_delete_with_notification(
-                context=context,
-                chat_id=chat_id,
-                message_ids_to_delete=sent_msg_id,
-                delete_time=AUTO_DELETE_TIME
+                context=context, chat_id=chat_id,
+                message_ids_to_delete=sent_msg_id, delete_time=AUTO_DELETE_TIME
             )
         )
-
     return sent_msg_id
 
 
 # ================= BACKGROUND TASKS =================
 async def periodic_cleanup(context):
-    """Clean up old video records every hour."""
     while True:
         await asyncio.sleep(3600)
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            cur.execute(
-                "DELETE FROM adult_videos WHERE created_at < NOW() - INTERVAL '7 days'"
-            )
-            deleted_count = cur.rowcount
+            cur.execute("DELETE FROM adult_videos WHERE created_at < NOW() - INTERVAL '7 days'")
+            deleted = cur.rowcount
             conn.commit()
             cur.close()
             db_pool.putconn(conn)
-            if deleted_count > 0:
-                logger.info(f"🗑️ Cleaned up {deleted_count} old video records")
+            if deleted > 0:
+                logger.info(f"🗑️ Cleaned {deleted} old records")
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
 
 
 async def notify_expired_subs(provider_app_instance: Application):
-    """
-    Background task: Check every 12 hours for expiring/expired subscriptions.
-    Notify users and admin about expiring subscriptions.
-    Does NOT kick users - only sends notification.
-    """
-    await asyncio.sleep(60)  # Wait 1 min after startup
-    logger.info("✅ Subscription expiry notification task started")
+    """Check every 12 hours for expiring subscriptions and notify users."""
+    await asyncio.sleep(60)
+    logger.info("✅ Subscription expiry checker started")
 
     while True:
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-
-            # Find users whose subscription expires within 2 days and not yet notified
             cur.execute("""
                 SELECT user_id, end_date FROM subscribers
                 WHERE end_date < NOW() + INTERVAL '2 days'
                 AND end_date > NOW() - INTERVAL '7 days'
                 AND notified = FALSE
             """)
-            users_to_notify = cur.fetchall()
+            users = cur.fetchall()
 
-            notified_count = 0
-            for (user_id, end_date) in users_to_notify:
+            for (user_id, end_date) in users:
                 is_expired = end_date < datetime.now()
-
                 if is_expired:
-                    user_message = (
+                    msg_text = (
                         "⚠️ <b>Subscription Expired!</b>\n\n"
-                        f"📅 Tumhari VIP subscription <b>{end_date.strftime('%d-%m-%Y')}</b> ko expire ho gayi.\n\n"
-                        "🔁 Renew karne ke liye /start type karo aur 'Buy Subscription' pe click karo.\n\n"
-                        "❌ Agar renew nahi karoge toh VIP content ka access band ho jayega.\n\n"
+                        f"📅 Expired on: {end_date.strftime('%d-%m-%Y')}\n\n"
+                        "🔁 Renew: /start → Buy Subscription\n"
                         "❓ Help: @ownermahi"
                     )
                 else:
                     remaining = (end_date - datetime.now()).days
-                    user_message = (
+                    msg_text = (
                         "⚠️ <b>Subscription Expiry Alert!</b>\n\n"
-                        f"📅 Tumhari VIP subscription <b>{remaining} din</b> mein expire hone wali hai "
-                        f"({end_date.strftime('%d-%m-%Y')}).\n\n"
-                        "🔁 Continuous access ke liye abhi renew karo!\n"
-                        "/start type karke 'Buy Subscription' pe click karo.\n\n"
+                        f"📅 Expires in <b>{remaining} days</b> ({end_date.strftime('%d-%m-%Y')})\n\n"
+                        "🔁 Renew now: /start → Buy Subscription\n"
                         "❓ Help: @ownermahi"
                     )
-
-                # Notify user
                 try:
                     await provider_app_instance.bot.send_message(
-                        chat_id=user_id,
-                        text=user_message,
-                        parse_mode='HTML'
+                        chat_id=user_id, text=msg_text, parse_mode='HTML'
                     )
-                    notified_count += 1
-                    logger.info(f"✅ Expiry notification sent to user {user_id}")
                 except Exception as e:
-                    logger.error(f"❌ Could not notify user {user_id}: {e}")
-
-                # Notify admin
+                    logger.error(f"Notify user {user_id} error: {e}")
                 try:
-                    status_text = "EXPIRED" if is_expired else f"Expires in {remaining} days"
+                    status = "EXPIRED" if is_expired else f"Expires in {remaining}d"
                     await provider_app_instance.bot.send_message(
                         chat_id=ADMIN_USER_ID,
-                        text=(
-                            f"🔔 <b>Subscription Alert</b>\n\n"
-                            f"👤 User ID: <code>{user_id}</code>\n"
-                            f"📊 Status: {status_text}\n"
-                            f"📅 End Date: {end_date.strftime('%d-%m-%Y')}\n\n"
-                            f"User ko notify kar diya gaya hai."
-                        ),
+                        text=f"🔔 Sub Alert: User <code>{user_id}</code> - {status}",
                         parse_mode='HTML'
                     )
-                except Exception as e:
-                    logger.error(f"❌ Admin notify error: {e}")
-
-                # Mark as notified
-                cur.execute(
-                    "UPDATE subscribers SET notified = TRUE WHERE user_id = %s",
-                    (user_id,)
-                )
+                except:
+                    pass
+                cur.execute("UPDATE subscribers SET notified = TRUE WHERE user_id = %s", (user_id,))
                 conn.commit()
-
-                await asyncio.sleep(2)  # Avoid flood limits
+                await asyncio.sleep(2)
 
             cur.close()
             db_pool.putconn(conn)
-
-            if notified_count > 0:
-                logger.info(f"📬 Notified {notified_count} users about subscription expiry")
-
         except Exception as e:
-            logger.error(f"Notify expiry error: {e}")
+            logger.error(f"Expiry check error: {e}")
 
-        await asyncio.sleep(43200)  # Check every 12 hours
+        await asyncio.sleep(43200)  # 12 hours
 
 
-# ================= RUN BOTH BOTS =================
+# ================================================================
+#                    RUN BOTH BOTS
+# ================================================================
+
 async def run_bots():
     if not MAIN_BOT_TOKEN:
         logger.error("❌ MAIN_BOT_TOKEN not found!")
         return
+    if not PROVIDER_BOT_TOKEN:
+        logger.error("❌ PROVIDER_BOT_TOKEN not found!")
+        return
 
-    # ===== MAIN BOT (ADMIN) SETUP =====
+    # ============ MAIN BOT (ADMIN ONLY) ============
     main_app = Application.builder().token(MAIN_BOT_TOKEN).build()
 
-    # Single upload conversation
     upload_conv = ConversationHandler(
         entry_points=[CommandHandler('post', start_upload)],
         states={
             WAIT_TRIM: [
                 CommandHandler('skip', get_trim),
-                CommandHandler('cancel', cancel_flow),
+                CommandHandler('cancel', cancel_admin_flow),
                 CommandHandler('start', admin_start),
                 MessageHandler(filters.ALL & ~filters.COMMAND, get_trim),
             ],
             WAIT_FULL: [
                 CommandHandler('done', get_full_and_process),
-                CommandHandler('cancel', cancel_flow),
+                CommandHandler('cancel', cancel_admin_flow),
                 CommandHandler('start', admin_start),
                 MessageHandler(filters.ALL & ~filters.COMMAND, get_full_and_process),
             ]
         },
         fallbacks=[
-            CommandHandler('cancel', cancel_flow),
+            CommandHandler('cancel', cancel_admin_flow),
             CommandHandler('start', admin_start),
         ],
         allow_reentry=True
     )
     main_app.add_handler(upload_conv)
 
-    # Bulk upload conversation
     bulk_conv = ConversationHandler(
         entry_points=[CommandHandler('bulk', start_bulk_upload)],
         states={
             BULK_WAIT_VIDEO: [
                 CommandHandler('done', process_bulk_video),
-                CommandHandler('cancel', cancel_flow),
+                CommandHandler('cancel', cancel_admin_flow),
                 CommandHandler('start', admin_start),
                 MessageHandler(filters.ALL & ~filters.COMMAND, process_bulk_video),
             ]
         },
         fallbacks=[
-            CommandHandler('cancel', cancel_flow),
+            CommandHandler('cancel', cancel_admin_flow),
             CommandHandler('start', admin_start),
         ],
         allow_reentry=True
@@ -1739,70 +1569,32 @@ async def run_bots():
     main_app.add_handler(bulk_conv)
 
     main_app.add_handler(CommandHandler('start', admin_start))
-    logger.info("✅ Main Bot handlers configured")
+    logger.info("✅ Main Bot (Admin) handlers configured")
 
-    # ===== PROVIDER BOT (USER-FACING) SETUP =====
-    if not PROVIDER_BOT_TOKEN:
-        logger.error("❌ PROVIDER_BOT_TOKEN not found!")
-        return
-
+    # ============ PROVIDER BOT (USER-FACING) ============
+    # NO ConversationHandler - clean simple handlers
     provider_app = Application.builder().token(PROVIDER_BOT_TOKEN).build()
 
-    # Payment conversation handler (must be added BEFORE other callback handlers)
-    payment_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(handle_buy_sub, pattern="^buy_sub$")
-        ],
-        states={
-            PAY_SCREENSHOT: [
-                CommandHandler('cancel', cancel_payment),
-                CommandHandler('start', payment_fallback_start),
-                MessageHandler(filters.PHOTO, receive_screenshot),
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
-                    lambda u, c: u.message.reply_text(
-                        "❌ Photo bhejein! Screenshot ka photo chahiye.\n"
-                        "❌ Cancel: /cancel"
-                    ) or PAY_SCREENSHOT
-                ),
-            ],
-            PAY_UTR: [
-                CommandHandler('cancel', cancel_payment),
-                CommandHandler('start', payment_fallback_start),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_utr),
-            ],
-        },
-        fallbacks=[
-            CommandHandler('cancel', cancel_payment),
-            CommandHandler('start', payment_fallback_start),
-        ],
-        allow_reentry=True,
-        per_message=False,
-    )
-    provider_app.add_handler(payment_conv)
-
-    # Start command handler
+    # 1. /start - always works, shows menu or video
     provider_app.add_handler(CommandHandler('start', provider_start))
 
-    # Quality selection callbacks
-    provider_app.add_handler(
-        CallbackQueryHandler(
-            handle_quality_callback,
-            pattern="^(quality_|allquality_)"
-        )
-    )
+    # 2. /cancel - cancels payment flow
+    provider_app.add_handler(CommandHandler('cancel', provider_cancel))
 
-    # Admin payment approval/reject callbacks
-    provider_app.add_handler(
-        CallbackQueryHandler(
-            admin_payment_action,
-            pattern="^(approve_|reject_)"
-        )
-    )
+    # 3. All callback buttons (quality, payment, admin actions)
+    provider_app.add_handler(CallbackQueryHandler(provider_handle_callback))
 
-    logger.info("✅ Provider Bot handlers configured (with payment flow)")
+    # 4. Photo messages (payment screenshots)
+    provider_app.add_handler(MessageHandler(filters.PHOTO, provider_handle_photo))
 
-    # ===== START BOTH BOTS =====
+    # 5. Text messages (UTR numbers)
+    provider_app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND, provider_handle_text
+    ))
+
+    logger.info("✅ Provider Bot (User) handlers configured")
+
+    # ============ START BOTH ============
     try:
         await main_app.initialize()
         await main_app.start()
@@ -1815,27 +1607,22 @@ async def run_bots():
         logger.info("✅ Provider Bot started!")
 
         logger.info("=" * 50)
-        logger.info("✅ BOTH TELEGRAM BOTS STARTED SUCCESSFULLY!")
-        logger.info("=" * 50)
-        logger.info("📌 REMINDERS:")
-        logger.info("  1. Provider Bot ko BACKUP_1 channel mein Admin banana zaroori hai!")
-        logger.info("  2. Provider Bot ko PAID_CH mein Admin banana (invite links ke liye)!")
-        logger.info(f"  3. UPI ID set hai: {UPI_ID}")
-        logger.info(f"  4. Subscription Amount: {SUBSCRIPTION_AMOUNT}₹")
+        logger.info("✅ BOTH BOTS RUNNING!")
+        logger.info(f"📌 Admin Bot: Only for ADMIN_USER_ID={ADMIN_USER_ID}")
+        logger.info(f"📌 Provider Bot: For all users")
+        logger.info(f"📌 UPI: {UPI_ID}")
+        logger.info(f"📌 Amount: {SUBSCRIPTION_AMOUNT}₹")
         logger.info("=" * 50)
 
-        # Start background tasks
         asyncio.create_task(periodic_cleanup(None))
-        logger.info("✅ Periodic cleanup task started")
-
         asyncio.create_task(notify_expired_subs(provider_app))
-        logger.info("✅ Subscription expiry notification task started")
+        logger.info("✅ Background tasks started")
 
         while True:
             await asyncio.sleep(3600)
 
     except Exception as e:
-        logger.error(f"❌ Bot startup error: {e}")
+        logger.error(f"❌ Startup error: {e}")
         raise
     finally:
         await main_app.updater.stop()
@@ -1846,30 +1633,29 @@ async def run_bots():
         await provider_app.shutdown()
 
 
-# ================= MAIN ENTRY POINT =================
+# ================================================================
 if __name__ == '__main__':
-    required_vars = ['MAIN_BOT_TOKEN', 'PROVIDER_BOT_TOKEN', 'DATABASE_URL']
-    missing_vars = [var for var in required_vars if not os.environ.get(var)]
-
-    if missing_vars:
-        logger.error(f"❌ Missing required environment variables: {missing_vars}")
+    required = ['MAIN_BOT_TOKEN', 'PROVIDER_BOT_TOKEN', 'DATABASE_URL']
+    missing = [v for v in required if not os.environ.get(v)]
+    if missing:
+        logger.error(f"❌ Missing env vars: {missing}")
         exit(1)
 
     try:
         init_db_pool()
         setup_db()
     except Exception as e:
-        logger.error(f"❌ Database initialization failed: {e}")
+        logger.error(f"❌ DB init failed: {e}")
         exit(1)
 
     flask_thread = Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
-    logger.info("✅ Flask server started in background thread")
+    logger.info("✅ Flask started")
 
     try:
         asyncio.run(run_bots())
     except KeyboardInterrupt:
         logger.info("🛑 Shutting down...")
     except Exception as e:
-        logger.error(f"❌ Fatal error: {e}")
+        logger.error(f"❌ Fatal: {e}")
