@@ -997,37 +997,38 @@ async def run_bots():
     
     main_app = Application.builder().token(MAIN_BOT_TOKEN).build()
     
-    # In run_bots() function:
-
-upload_conv = ConversationHandler(
-    entry_points=[CommandHandler('post', start_upload)],
-    states={
-        WAIT_TRIM: [
-            MessageHandler(filters.VIDEO, get_trim),
-            MessageHandler(filters.PHOTO, get_trim),
-            MessageHandler(filters.Document.VIDEO, get_trim),
-            MessageHandler(filters.Document.ALL, get_trim),
-            MessageHandler(filters.ANIMATION, get_trim),
-            MessageHandler(filters.COMMAND, get_trim),
-            MessageHandler(filters.TEXT, get_trim),
-        ],
-        WAIT_FULL: [
-            MessageHandler(filters.VIDEO, get_full_video),
-            MessageHandler(filters.Document.VIDEO, get_full_video),
-            MessageHandler(filters.Document.ALL, get_full_video),
-            MessageHandler(filters.COMMAND, get_full_video),
-            MessageHandler(filters.TEXT, get_full_video),
-        ]
-    },
-    fallbacks=[CommandHandler('cancel', cancel_flow)]
-)
-main_app.add_handler(upload_conv)
+    # Properly indented upload_conv block
+    upload_conv = ConversationHandler(
+        entry_points=[CommandHandler('post', start_upload)],
+        states={
+            WAIT_TRIM: [
+                MessageHandler(filters.VIDEO, get_trim),
+                MessageHandler(filters.PHOTO, get_trim),
+                MessageHandler(filters.Document.VIDEO, get_trim),
+                MessageHandler(filters.Document.ALL, get_trim),
+                MessageHandler(filters.ANIMATION, get_trim),
+                MessageHandler(filters.COMMAND, get_trim),
+                MessageHandler(filters.TEXT, get_trim),
+            ],
+            WAIT_FULL: [
+                MessageHandler(filters.VIDEO, get_full_video),
+                MessageHandler(filters.Document.VIDEO, get_full_video),
+                MessageHandler(filters.Document.ALL, get_full_video),
+                MessageHandler(filters.COMMAND, get_full_video),
+                MessageHandler(filters.TEXT, get_full_video),
+            ]
+        },
+        fallbacks=[CommandHandler('cancel', cancel_flow)]
+    )
+    main_app.add_handler(upload_conv)
     
     bulk_conv = ConversationHandler(
         entry_points=[CommandHandler('bulk', start_bulk_upload)],
         states={
-            BULK_WAIT_VIDEO: [MessageHandler(filters.ALL & ~filters.COMMAND, process_bulk_video),
-                             MessageHandler(filters.COMMAND, process_bulk_video)]
+            BULK_WAIT_VIDEO: [
+                MessageHandler(filters.ALL & ~filters.COMMAND, process_bulk_video),
+                MessageHandler(filters.COMMAND, process_bulk_video)
+            ]
         },
         fallbacks=[CommandHandler('cancel', cancel_flow)]
     )
