@@ -1126,7 +1126,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💎 Buy VIP ({SUBSCRIPTION_AMOUNT}₹/Month)",
             callback_data="buy_sub"
         )],
-        [InlineKeyboardButton("🆓 Free Channel", url=https://t.me/+wcYoTQhIz-ZmOTY1)],
+        [InlineKeyboardButton("🆓 Free Channel", url="https://t.me/+wcYoTQhIz-ZmOTY1")]
         [InlineKeyboardButton("👨‍💻 Contact Admin", url="https://t.me/ownermahi")]
     ]
 
