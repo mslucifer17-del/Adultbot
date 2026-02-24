@@ -5,14 +5,15 @@ import asyncio
 import logging
 import aiohttp
 import psycopg2
-from html import escape as html_escape  # ✅ NEW IMPORT
+from html import escape as html_escape
 from psycopg2 import pool
+from psycopg2.extras import execute_values
 from flask import Flask, redirect
 from threading import Thread
 from io import BytesIO
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, 
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes, ConversationHandler
 )
 
@@ -38,7 +39,10 @@ BACKUP_2 = int(os.environ.get("BACKUP_CHANNEL_2", "0"))
 
 AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "300"))
 
-WAIT_TRIM, WAIT_FULL = range(2)
+# Quality handling constants
+QUALITY_ORDER = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "240p", "HQ", "LQ"]
+
+WAIT_TRIM, WAIT_FULL, WAIT_FINALIZE = range(3)
 BULK_WAIT_VIDEO, BULK_CONFIRM = range(2)
 
 # ================= DATABASE SETUP =================
@@ -58,6 +62,8 @@ def setup_db():
     try:
         conn = db_pool.getconn()
         cur = conn.cursor()
+        
+        # Main table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS adult_videos (
                 vid_id SERIAL PRIMARY KEY,
@@ -67,19 +73,81 @@ def setup_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        
+        # Multi-quality table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS adult_video_files (
+                file_entry_id SERIAL PRIMARY KEY,
+                vid_id INTEGER REFERENCES adult_videos(vid_id) ON DELETE CASCADE,
+                quality TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                backup_msg_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (vid_id, quality)
+            )
+        """)
+        
         try:
             cur.execute("ALTER TABLE adult_videos ADD COLUMN backup_msg_id INTEGER;")
         except Exception:
             conn.rollback()
+        
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_adult_videos_title ON adult_videos(title);")
+        except Exception:
+            pass
             
         conn.commit()
         cur.close()
-        logger.info("✅ Database tables created/verified with backup_msg_id")
+        logger.info("✅ Database tables created/verified")
     except Exception as e:
         logger.error(f"❌ Database setup failed: {e}")
     finally:
         if conn:
             db_pool.putconn(conn)
+
+# ================= QUALITY FUNCTIONS =================
+
+def normalize_quality_label(raw: str | None) -> str:
+    if not raw:
+        return "HQ"
+    raw = raw.lower().strip()
+    replacements = {"4k": "2160p", "2k": "1440p", "fullhd": "1080p"}
+    return replacements.get(raw, raw.upper())
+
+def quality_rank(label: str) -> int:
+    norm = normalize_quality_label(label)
+    try:
+        return QUALITY_ORDER.index(norm)
+    except ValueError:
+        return len(QUALITY_ORDER)
+
+def detect_quality_from_message(msg) -> str:
+    candidates = []
+    source_text = " ".join(filter(None, [
+        msg.caption if msg.caption else "",
+        msg.document.file_name if msg.document and msg.document.file_name else "",
+    ])).lower()
+
+    match = re.search(r"(2160p|1440p|1080p|720p|480p|360p|240p|4k|2k|fullhd|hq|lq)", source_text)
+    if match:
+        candidates.append(match.group(1))
+
+    if msg.video:
+        height = msg.video.height or 0
+        inferred = (
+            "2160p" if height >= 2000 else
+            "1440p" if height >= 1300 else
+            "1080p" if height >= 900 else
+            "720p" if height >= 650 else
+            "480p" if height >= 450 else
+            "360p" if height >= 320 else
+            "240p" if height >= 200 else
+            "HQ"
+        )
+        candidates.append(inferred)
+
+    return normalize_quality_label(candidates if candidates else "HQ")
 
 # ================= HELPER FUNCTIONS =================
 
@@ -114,7 +182,6 @@ def generate_display_title(cleaned_title):
         return cleaned_title[:47] + "..."
     return cleaned_title
 
-# ✅ NEW: Build safe HTML caption (escapes all dynamic content)
 def build_free_channel_caption(title, gplink):
     safe_title = html_escape(title)
     safe_gplink = html_escape(gplink)
@@ -122,25 +189,12 @@ def build_free_channel_caption(title, gplink):
         f"🔞 <b>{safe_title}</b>\n\n"
         f"🔥 <b>Watch Full Video &amp; Download:</b>\n"
         f"👉 {safe_gplink}\n\n"
-        f"💎 <b>Join VIP for Direct Files:</b> https://t.me/YOUR_VIP_LINK"
+        f"💎 <b>Join VIP for Direct Files:</b> https://t.me/+wcYoTQhIz-ZmOTY1"
     )
 
-# ✅ NEW: Build safe HTML caption for backup/paid channels
 def build_backup_caption(title):
     safe_title = html_escape(title)
     return f"🔒 {safe_title}"
-
-# ✅ NEW: Build safe Markdown caption for provider bot
-def build_provider_caption(title):
-    # Escape Markdown special characters: _ * [ ] ( ) ~ ` > # + - = | { } . !
-    safe_title = title.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace(']', '\\]')
-    safe_title = safe_title.replace('(', '\\(').replace(')', '\\)').replace('~', '\\~').replace('`', '\\`')
-    return (
-        f"🎬 *{safe_title}*\n\n"
-        f"⏱️ *Auto\\-Delete:* 5 minutes\n"
-        f"💾 *Forward to Saved Messages ASAP\\!*\n\n"
-        f"⚠️ _Yeh file automatically delete ho jayegi\\._"
-    )
 
 async def shorten_link(long_url):
     if not GPLINKS_API_KEY:
@@ -228,10 +282,13 @@ async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Access Denied! Only admin can use this command.")
         return ConversationHandler.END
     
+    context.user_data.clear()
+    context.user_data['quality_payloads'] = []
+    
     await update.message.reply_text(
-        "⚡ Single Post Mode!\n\n"
-        "✂️ Sabse pehle choti TRIMMED VIDEO (Preview) bhejo.\n\n"
-        "Agar aapke paas trim video nahi hai, toh bas /skip likh kar bhej do!"
+        "⚡ Single Post Mode - Multi-Quality!\n\n"
+        "✂️ Sabse pehle TRIMMED VIDEO (Preview) bhejo.\n\n"
+        "Agar aapke paas trim video nahi hai, toh /skip likho!"
     )
     return WAIT_TRIM
 
@@ -246,7 +303,8 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['trim_type'] = 'photo'
             await msg.reply_text(
                 "⏭️ Trim Skipped!\n\n"
-                "🔞 Ab seedha FULL HD VIDEO bhejo."
+                "🔞 Ab FULL HD VIDEO bhejo.\n\n"
+                "📝 Jab sab qualities ready ho jayein toh /done likho."
             )
             return WAIT_FULL
         else:
@@ -278,185 +336,190 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(
         f"✅ Trim Video Saved!\n\n"
         f"📝 Title: {cleaned_title}\n\n"
-        "🔞 Ab FULL HD VIDEO bhejo."
+        "🔞 Ab aap FULL VIDEO ka har quality (480p/720p/1080p) alag se bhejo.\n\n"
+        "📤 Har quality video separately forward karo.\n"
+        "✅ Jab sab ho jaye toh /done likho."
     )
     return WAIT_FULL
 
-async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def get_full_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
         return WAIT_FULL
 
+    # Check for /done command
+    if msg.text and msg.text.strip().lower() == '/done':
+        return await finalize_single_upload(update, context)
+
     if not msg.video and not msg.document:
-        await msg.reply_text("❌ Error: Ye Full Video nahi lag rahi. Kripya Video File bhejein.")
+        await msg.reply_text("❌ Video file bhejo ya /done likho finalize karne ke liye.")
         return WAIT_FULL
 
-    status = await msg.reply_text("⏳ Processing Started...")
+    quality = detect_quality_from_message(msg)
+    file_id = msg.video.file_id if msg.video else msg.document.file_id
     
-    title = context.user_data.get('title', '')
-    if not title:
-        raw_caption = msg.caption if msg.caption else ""
-        title = clean_title(raw_caption)
-        context.user_data['title'] = title
+    entry = {
+        "quality": quality,
+        "file_id": file_id,
+        "source_chat_id": msg.chat_id,
+        "source_msg_id": msg.message_id,
+        "thumb_file_id": msg.video.thumbnail.file_id if msg.video and msg.video.thumbnail else None
+    }
+    
+    context.user_data['quality_payloads'].append(entry)
+    
+    await msg.reply_text(
+        f"✅ {quality} quality save ho gaya! ✓\n\n"
+        f"📊 Total saved: {len(context.user_data['quality_payloads'])} quality(ies)\n\n"
+        "➕ Agar aur quality hain toh bhejo.\n"
+        "✅ Sab ho gaya toh /done likho."
+    )
+    return WAIT_FULL
 
-    full_file_id = msg.video.file_id if msg.video else msg.document.file_id
-    trim_type = context.user_data.get('trim_type', 'video')
-    trim_file_id = context.user_data.get('trim_file')
+async def finalize_single_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    quality_payloads = context.user_data.get("quality_payloads", [])
+    
+    if not quality_payloads:
+        await update.message.reply_text("⚠️ Abhi tak koi full video nahi mila. Pehle quality files bhejo.")
+        return WAIT_FULL
 
-    # Handle thumbnail for free channel when trim is skipped
-    thumbnail_bytes = None
-    if trim_file_id == 'use_thumbnail':
-        thumb_obj = None
-        if msg.video and msg.video.thumbnail:
-            thumb_obj = msg.video.thumbnail
-        elif msg.document and msg.document.thumbnail:
-            thumb_obj = msg.document.thumbnail
-        
-        if thumb_obj:
+    status = await update.message.reply_text("⏳ Processing saari qualities...")
+
+    try:
+        title = context.user_data.get('title', 'Exclusive Premium Content')
+        saved_variants = []
+
+        # Upload all variants to BACKUP_1
+        for idx, payload in enumerate(quality_payloads):
             try:
-                file_info = await context.bot.get_file(thumb_obj.file_id)
-                downloaded_bytes = await file_info.download_as_bytearray()
-                thumbnail_bytes = bytes(downloaded_bytes)
-                trim_type = 'photo_bytes'
-            except Exception as e:
-                logger.error(f"Thumbnail extraction error: {e}")
-                trim_file_id = "https://i.imgur.com/6XK4F6K.png"
-                trim_type = 'photo_url'
-        else:
-            trim_file_id = "https://i.imgur.com/6XK4F6K.png"
-            trim_type = 'photo_url'
-
-    # ✅ STEP 1: BACKUP_1 par copy_message se upload (thumbnail preserved)
-    await status.edit_text("⏳ Uploading to Backup Channel...")
-    backup_msg_id = None
-    backup_caption = build_backup_caption(title)
-    
-    if BACKUP_1 != 0:
-        try:
-            copied_msg = await context.bot.copy_message(
-                chat_id=BACKUP_1,
-                from_chat_id=msg.chat_id,
-                message_id=msg.message_id,
-                caption=backup_caption,
-                parse_mode='HTML'
-            )
-            backup_msg_id = copied_msg.message_id
-            logger.info(f"✅ Uploaded to Backup 1, Msg ID: {backup_msg_id}")
-        except Exception as e:
-            logger.error(f"❌ Failed to copy to Backup 1: {e}")
-
-    # ✅ STEP 2: Database mein save karo
-    conn = None
-    vid_id = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO adult_videos (title, full_file_id, backup_msg_id) VALUES (%s, %s, %s) RETURNING vid_id", 
-            (title, full_file_id, backup_msg_id)
-        )
-        vid_id = cur.fetchone()[0]
-        conn.commit()
-        cur.close()
-        logger.info(f"✅ Video saved to DB with ID: {vid_id}")
-    except Exception as e:
-        logger.error(f"❌ Database error: {e}")
-        await status.edit_text(f"❌ Database error: {e}")
-        context.user_data.clear()
-        return ConversationHandler.END
-    finally:
-        if conn:
-            db_pool.putconn(conn)
-
-    # ✅ STEP 3: BACKUP_2 & PAID_CH par copy_message
-    await status.edit_text("⏳ Uploading to Paid Channel & Backup 2...")
-    channels_to_upload = [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]
-    for ch_id in channels_to_upload:
-        try:
-            await context.bot.copy_message(
-                chat_id=ch_id,
-                from_chat_id=msg.chat_id,
-                message_id=msg.message_id,
-                caption=backup_caption,
-                parse_mode='HTML'
-            )
-            logger.info(f"✅ Uploaded to channel: {ch_id}")
-        except Exception as e:
-            logger.error(f"❌ Failed to upload to {ch_id}: {e}")
-
-    # Generate Links
-    web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
-    await status.edit_text("⏳ Generating GPLinks...")
-    gplink = await shorten_link(web_link)
-
-    # ✅ STEP 4: Post to Free Channel with SAFE HTML caption
-    await status.edit_text("⏳ Posting to Free Channel...")
-    caption = build_free_channel_caption(title, gplink)
-
-    try:
-        if FREE_CH != 0:
-            if trim_type == 'photo_bytes' and thumbnail_bytes:
-                photo_file = BytesIO(thumbnail_bytes)
-                photo_file.name = "thumbnail.jpg"
-                await context.bot.send_photo(
-                    chat_id=FREE_CH, 
-                    photo=photo_file, 
-                    caption=caption, 
-                    parse_mode='HTML'
-                )
-            elif trim_type == 'photo_url':
-                await context.bot.send_photo(
-                    chat_id=FREE_CH, 
-                    photo=trim_file_id, 
-                    caption=caption, 
-                    parse_mode='HTML'
-                )
-            elif trim_type in ['video', 'document']:
-                trim_chat_id = context.user_data.get('trim_chat_id')
-                trim_msg_id = context.user_data.get('trim_msg_id')
-                if trim_chat_id and trim_msg_id:
+                status_text = f"⏳ Uploading {payload['quality']}... ({idx+1}/{len(quality_payloads)})"
+                await status.edit_text(status_text)
+                
+                backup_msg_id = None
+                if BACKUP_1:
                     try:
-                        await context.bot.copy_message(
-                            chat_id=FREE_CH,
-                            from_chat_id=trim_chat_id,
-                            message_id=trim_msg_id,
-                            caption=caption,
+                        copied = await context.bot.copy_message(
+                            chat_id=BACKUP_1,
+                            from_chat_id=payload['source_chat_id'],
+                            message_id=payload['source_msg_id'],
+                            caption=build_backup_caption(title),
                             parse_mode='HTML'
                         )
+                        backup_msg_id = copied.message_id
+                        logger.info(f"✅ {payload['quality']} uploaded to BACKUP_1: {backup_msg_id}")
                     except Exception as e:
-                        logger.error(f"copy_message for trim failed: {e}")
-                        await context.bot.send_video(
-                            chat_id=FREE_CH,
-                            video=trim_file_id,
-                            caption=caption,
-                            parse_mode='HTML',
-                            supports_streaming=True
-                        )
-                else:
-                    await context.bot.send_video(
+                        logger.error(f"❌ Failed to backup {payload['quality']}: {e}")
+                
+                saved_variants.append({**payload, "backup_msg_id": backup_msg_id})
+            except Exception as e:
+                logger.error(f"Error processing variant: {e}")
+                continue
+
+        if not saved_variants:
+            await status.edit_text("❌ Koi bhi quality upload nahi ho saki.")
+            return ConversationHandler.END
+
+        # Find best quality (lowest rank = best)
+        hero_variant = min(saved_variants, key=lambda item: quality_rank(item['quality']))
+
+        await status.edit_text("⏳ Database mein save ho raha hai...")
+
+        # Database operations
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute(
+            "INSERT INTO adult_videos (title, full_file_id, backup_msg_id) VALUES (%s, %s, %s) RETURNING vid_id",
+            (title, hero_variant['file_id'], hero_variant['backup_msg_id'])
+        )
+        vid_id = cur.fetchone()
+
+        # Insert all variants
+        execute_values(
+            cur,
+            """
+            INSERT INTO adult_video_files (vid_id, quality, file_id, backup_msg_id)
+            VALUES %s
+            """,
+            [(vid_id, var['quality'], var['file_id'], var['backup_msg_id']) for var in saved_variants]
+        )
+        conn.commit()
+        cur.close()
+        db_pool.putconn(conn)
+
+        logger.info(f"✅ Video saved to DB with ID: {vid_id}")
+
+        # Copy to BACKUP_2 & PAID_CH
+        await status.edit_text("⏳ Uploading to Paid Channels...")
+        channels_to_upload = [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]
+        for ch_id in channels_to_upload:
+            try:
+                await context.bot.copy_message(
+                    chat_id=ch_id,
+                    from_chat_id=hero_variant['source_chat_id'],
+                    message_id=hero_variant['source_msg_id'],
+                    caption=build_backup_caption(title),
+                    parse_mode='HTML'
+                )
+                logger.info(f"✅ Uploaded to channel: {ch_id}")
+            except Exception as e:
+                logger.error(f"❌ Failed to upload to {ch_id}: {e}")
+
+        # Generate link
+        await status.edit_text("⏳ Generating GPLinks...")
+        web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
+        gplink = await shorten_link(web_link)
+
+        # Post to Free Channel
+        await status.edit_text("⏳ Posting to Free Channel...")
+        caption = build_free_channel_caption(title, gplink)
+
+        if FREE_CH != 0:
+            try:
+                trim_type = context.user_data.get('trim_type', 'video')
+                trim_file_id = context.user_data.get('trim_file')
+
+                if trim_type == 'photo' and trim_file_id == 'use_thumbnail':
+                    await context.bot.send_photo(
                         chat_id=FREE_CH,
-                        video=trim_file_id,
+                        photo=hero_variant.get('thumb_file_id') or "https://i.imgur.com/6XK4F6K.png",
                         caption=caption,
-                        parse_mode='HTML',
-                        supports_streaming=True
+                        parse_mode='HTML'
                     )
-            
-            display_title = generate_display_title(title)
-            await status.edit_text(
-                f"✅ ALL DONE!\n\n"
-                f"🎬 Title: {display_title}\n"
-                f"🔗 Link: {gplink}\n"
-                f"🖼️ Thumbnail: Preserved via copy_message\n"
-                f"📦 Backup Msg ID: {backup_msg_id}"
-            )
-        else:
-            await status.edit_text(
-                f"✅ Done! (Free Channel ID not set)\n"
-                f"🔗 Link: {gplink}"
-            )
+                elif trim_type in ['video', 'document']:
+                    trim_chat_id = context.user_data.get('trim_chat_id')
+                    trim_msg_id = context.user_data.get('trim_msg_id')
+                    if trim_chat_id and trim_msg_id:
+                        try:
+                            await context.bot.copy_message(
+                                chat_id=FREE_CH,
+                                from_chat_id=trim_chat_id,
+                                message_id=trim_msg_id,
+                                caption=caption,
+                                parse_mode='HTML'
+                            )
+                        except Exception as e:
+                            logger.error(f"copy_message failed: {e}")
+                    
+                logger.info(f"✅ Posted to Free Channel")
+            except Exception as e:
+                logger.error(f"❌ Error posting to free channel: {e}")
+
+        display_title = generate_display_title(title)
+        quality_list = ", ".join([v['quality'] for v in saved_variants])
+        
+        await status.edit_text(
+            f"✅ ALL DONE!\n\n"
+            f"🎬 Title: {display_title}\n"
+            f"📊 Qualities: {quality_list}\n"
+            f"🔗 Link: {gplink}\n"
+            f"🖼️ Qualities Count: {len(saved_variants)}\n"
+            f"⭐ Best Quality: {hero_variant['quality']}"
+        )
+
     except Exception as e:
-        logger.error(f"❌ Error posting to free channel: {e}")
-        await status.edit_text(f"❌ Error posting to free channel: {e}")
+        logger.error(f"❌ Error in finalization: {e}")
+        await status.edit_text(f"❌ Error: {str(e)[:100]}")
 
     context.user_data.clear()
     return ConversationHandler.END
@@ -472,7 +535,7 @@ async def start_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "📦 BULK UPLOAD MODE ACTIVATED!\n\n"
-        "🎬 Ab aap 10-15 videos ek saath forward kar sakte ho.\n\n"
+        "🎬 Ab aap multiple videos ek saath forward kar sakte ho.\n\n"
         "📝 Instructions:\n"
         "1️⃣ Videos ek-ek karke forward karo\n"
         "2️⃣ Har video automatically process hogi\n"
@@ -515,8 +578,9 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         full_file_id = msg.video.file_id if msg.video else msg.document.file_id
         backup_caption = build_backup_caption(title)
+        quality = detect_quality_from_message(msg)
         
-        # ✅ STEP 1: BACKUP_1 par copy_message
+        # BACKUP_1 par copy
         backup_msg_id = None
         if BACKUP_1 != 0:
             try:
@@ -532,24 +596,24 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception as e:
                 logger.error(f"❌ Bulk #{bulk_count}: Failed to copy to Backup 1: {e}")
         
-        # ✅ STEP 2: Database mein save karo
-        conn = None
-        vid_id = None
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO adult_videos (title, full_file_id, backup_msg_id) VALUES (%s, %s, %s) RETURNING vid_id",
-                (title, full_file_id, backup_msg_id)
-            )
-            vid_id = cur.fetchone()[0]
-            conn.commit()
-            cur.close()
-        finally:
-            if conn:
-                db_pool.putconn(conn)
+        # Database save
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO adult_videos (title, full_file_id, backup_msg_id) VALUES (%s, %s, %s) RETURNING vid_id",
+            (title, full_file_id, backup_msg_id)
+        )
+        vid_id = cur.fetchone()
         
-        # ✅ STEP 3: BACKUP_2 & PAID_CH par copy_message
+        cur.execute(
+            "INSERT INTO adult_video_files (vid_id, quality, file_id, backup_msg_id) VALUES (%s, %s, %s, %s)",
+            (vid_id, quality, full_file_id, backup_msg_id)
+        )
+        conn.commit()
+        cur.close()
+        db_pool.putconn(conn)
+        
+        # BACKUP_2 & PAID_CH
         channels_to_upload = [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]
         for ch_id in channels_to_upload:
             try:
@@ -568,7 +632,7 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
         gplink = await shorten_link(web_link)
         
-        # ✅ STEP 4: Free channel par SAFE HTML caption ke saath post
+        # Free channel
         caption = build_free_channel_caption(title, gplink)
         
         if FREE_CH != 0:
@@ -583,29 +647,19 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 logger.info(f"✅ Bulk #{bulk_count}: Posted to Free Channel")
             except Exception as e:
                 logger.error(f"copy_message to free channel failed: {e}")
-                try:
-                    await context.bot.send_video(
-                        chat_id=FREE_CH,
-                        video=full_file_id,
-                        caption=caption,
-                        parse_mode='HTML',
-                        supports_streaming=True
-                    )
-                except Exception as e2:
-                    logger.error(f"Fallback send_video also failed: {e2}")
         
         display_title = generate_display_title(title)
         await status.edit_text(
             f"✅ Video #{bulk_count} Done!\n\n"
             f"📝 Title: {display_title}\n"
-            f"🔗 Link: {gplink}\n"
-            f"🖼️ Thumbnail: Preserved via copy_message\n\n"
+            f"📊 Quality: {quality}\n"
+            f"🔗 Link: {gplink}\n\n"
             f"📥 Aur videos forward karo ya /done likho!"
         )
         
     except Exception as e:
         logger.error(f"Bulk upload error: {e}")
-        await status.edit_text(f"❌ Error processing video #{bulk_count}: {e}\n\nContinue with next video or /done to finish.")
+        await status.edit_text(f"❌ Error: {str(e)[:100]}\n\nContinue with next video or /done.")
     
     return BULK_WAIT_VIDEO
 
@@ -624,94 +678,60 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             vid_id = int(text.split("vid_")[1])
             
-            conn = None
-            try:
-                conn = get_db_connection()
-                cur = conn.cursor()
-                cur.execute("SELECT title, full_file_id, backup_msg_id FROM adult_videos WHERE vid_id = %s", (vid_id,))
-                result = cur.fetchone()
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # Get video info
+            cur.execute("SELECT title FROM adult_videos WHERE vid_id = %s", (vid_id,))
+            title_row = cur.fetchone()
+            
+            if not title_row:
                 cur.close()
-            finally:
-                if conn:
-                    db_pool.putconn(conn)
-
-            if result:
-                title, file_id, backup_msg_id = result
-                
-                warning_msg = await update.message.reply_text(
-                    text=(
-                        f"👋 Hello {user_name}!\n\n"
-                        "⚠️ IMPORTANT NOTICE\n\n"
-                        "🕒 Yeh video 5 minutes baad auto-delete ho jayegi.\n\n"
-                        "💾 Saved Messages mein forward zaroor kar lena!\n\n"
-                        "🔒 Yeh copyright protection ke liye hai.\n\n"
-                        "⏳ Video bhej rahe hain..."
-                    )
-                )
-                
-                await asyncio.sleep(2)
-                try:
-                    await warning_msg.delete()
-                except:
-                    pass
-                
-                # ✅ SAFE caption without parse_mode issues
-                caption_text = (
-                    f"🎬 {title}\n\n"
-                    f"⏱️ Auto-Delete: 5 minutes\n"
-                    f"💾 Forward to Saved Messages ASAP!\n\n"
-                    f"⚠️ Yeh file automatically delete ho jayegi."
-                )
-
-                sent_msg_id = None
-                
-                # ✅ PRIMARY: copy_message from Backup Channel (thumbnail preserved!)
-                if backup_msg_id and BACKUP_1 != 0:
-                    try:
-                        copied_msg = await context.bot.copy_message(
-                            chat_id=chat_id,
-                            from_chat_id=BACKUP_1,
-                            message_id=backup_msg_id,
-                            caption=caption_text
-                        )
-                        sent_msg_id = copied_msg.message_id
-                        logger.info(f"✅ Sent video to user {chat_id} using copy_message")
-                    except Exception as e:
-                        logger.error(f"copy_message failed, falling back: {e}")
-                
-                # ✅ FALLBACK: file_id se bhejo
-                if not sent_msg_id:
-                    try:
-                        fallback_msg = await update.message.reply_video(
-                            video=file_id, 
-                            caption=caption_text,
-                            supports_streaming=True
-                        )
-                        sent_msg_id = fallback_msg.message_id
-                        logger.info(f"✅ Sent video to user {chat_id} using fallback file_id")
-                    except Exception as e:
-                        logger.error(f"Fallback send_video also failed: {e}")
-                        await update.message.reply_text("❌ Video bhejne mein error aaya. Please try again.")
-                        return
-                
-                # Auto delete schedule
-                asyncio.create_task(
-                    auto_delete_with_notification(
-                        context=context,
-                        chat_id=chat_id,
-                        message_id_to_delete=sent_msg_id,
-                        delete_time=AUTO_DELETE_TIME
-                    )
-                )
-                
-                logger.info(f"✅ Auto-delete scheduled for user {chat_id}")
-                
-            else:
+                db_pool.putconn(conn)
                 await update.message.reply_text(
                     "❌ Video Not Found!\n\n"
-                    "Yeh video delete ho chuki hai ya invalid link hai.\n"
-                    "Naya link free channel se lein."
+                    "Yeh video delete ho chuki hai ya invalid link hai."
                 )
+                return
+            
+            title = title_row
+            
+            # Get all qualities
+            cur.execute("""
+                SELECT file_entry_id, quality, file_id, backup_msg_id
+                FROM adult_video_files
+                WHERE vid_id = %s
+                ORDER BY 1
+            """, (vid_id,))
+            variants = cur.fetchall()
+            cur.close()
+            db_pool.putconn(conn)
+            
+            if not variants:
+                await update.message.reply_text("❌ Koi quality available nahi hai.")
+                return
+            
+            # Create buttons
+            buttons = []
+            sorted_variants = sorted(variants, key=lambda row: quality_rank(row[1]))
+            
+            for file_entry_id, quality, file_id, backup_msg_id in sorted_variants:
+                btn_text = f"📥 {quality.upper()}"
+                buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"quality:{file_entry_id}")])
+            
+            buttons.append([InlineKeyboardButton("❌ Close", callback_data="close_panel")])
+            
+            # Send message
+            await update.message.reply_text(
+                text=(
+                    f"🎬 <b>{html_escape(title)}</b>\n\n"
+                    f"👇 Apni pasand ki quality choose karein:\n\n"
+                    f"⏱️ Auto-delete: {AUTO_DELETE_TIME // 60} minutes"
+                ),
+                reply_markup=InlineKeyboardMarkup(buttons),
+                parse_mode='HTML'
+            )
+            
         except ValueError:
             await update.message.reply_text("❌ Invalid video ID.")
         except Exception as e:
@@ -722,8 +742,96 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔞 Welcome!\n\n"
             "Please use a valid video link to access content.\n"
             "Example: Click on a video link from our free channel.\n\n"
-            "⚠️ Note: All videos auto-delete after 5 minutes for security."
+            "⚠️ Note: All videos auto-delete after some time for security."
         )
+
+async def provider_quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "close_panel":
+        try:
+            await query.message.delete()
+        except:
+            pass
+        return
+
+    try:
+        _, file_entry_id = query.data.split(":")
+        file_entry_id = int(file_entry_id)
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT vf.file_id, vf.quality, vf.backup_msg_id, v.title
+            FROM adult_video_files vf
+            JOIN adult_videos v ON vf.vid_id = v.vid_id
+            WHERE vf.file_entry_id = %s
+        """, (file_entry_id,))
+        row = cur.fetchone()
+        cur.close()
+        db_pool.putconn(conn)
+
+        if not row:
+            await query.message.reply_text("❌ Yeh quality available nahi rahi.")
+            return
+
+        file_id, quality, backup_msg_id, title = row
+
+        caption = (
+            f"🎬 {html_escape(title)}\n"
+            f"📦 Quality: {quality}\n"
+            f"⏱️ Auto-Delete: {AUTO_DELETE_TIME // 60} minutes\n"
+            f"💾 Forward to Saved Messages!"
+        )
+
+        sent_msg = None
+        
+        # Primary: copy from backup
+        if backup_msg_id and BACKUP_1:
+            try:
+                copied = await context.bot.copy_message(
+                    chat_id=query.message.chat_id,
+                    from_chat_id=BACKUP_1,
+                    message_id=backup_msg_id,
+                    caption=caption
+                )
+                sent_msg = copied.message_id
+                logger.info(f"✅ Sent {quality} using copy_message")
+            except Exception as e:
+                logger.error(f"copy_message failed: {e}")
+
+        # Fallback: file_id
+        if not sent_msg:
+            try:
+                sent = await context.bot.send_video(
+                    chat_id=query.message.chat_id,
+                    video=file_id,
+                    caption=caption,
+                    supports_streaming=True
+                )
+                sent_msg = sent.message_id
+                logger.info(f"✅ Sent {quality} using fallback")
+            except Exception as e:
+                logger.error(f"Fallback failed: {e}")
+                await query.message.reply_text("❌ Video bhejne mein error aaya.")
+                return
+
+        # Schedule auto-delete
+        asyncio.create_task(
+            auto_delete_with_notification(
+                context=context,
+                chat_id=query.message.chat_id,
+                message_id_to_delete=sent_msg,
+                delete_time=AUTO_DELETE_TIME
+            )
+        )
+
+        logger.info(f"✅ Auto-delete scheduled")
+        
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
+        await query.message.reply_text("❌ Error processing request.")
 
 async def periodic_cleanup(context):
     while True:
@@ -754,8 +862,8 @@ async def run_bots():
         states={
             WAIT_TRIM: [MessageHandler(filters.ALL & ~filters.COMMAND, get_trim),
                        MessageHandler(filters.COMMAND, get_trim)],
-            WAIT_FULL: [MessageHandler(filters.ALL & ~filters.COMMAND, get_full_and_process),
-                       MessageHandler(filters.COMMAND, get_full_and_process)]
+            WAIT_FULL: [MessageHandler(filters.ALL & ~filters.COMMAND, get_full_video),
+                       MessageHandler(filters.COMMAND, get_full_video)]
         },
         fallbacks=[CommandHandler('cancel', cancel_flow)]
     )
@@ -779,6 +887,7 @@ async def run_bots():
     
     provider_app = Application.builder().token(PROVIDER_BOT_TOKEN).build()
     provider_app.add_handler(CommandHandler('start', provider_start))
+    provider_app.add_handler(CallbackQueryHandler(provider_quality_callback, pattern=r"^(quality|close_panel)"))
     logger.info("✅ Provider Bot handlers configured")
 
     try:
@@ -827,8 +936,7 @@ if __name__ == '__main__':
         logger.error(f"❌ Database initialization failed: {e}")
         exit(1)
     
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
+    flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("✅ Flask server started in background thread")
     
@@ -838,4 +946,3 @@ if __name__ == '__main__':
         logger.info("🛑 Shutting down...")
     except Exception as e:
         logger.error(f"❌ Fatal error: {e}")
-        
