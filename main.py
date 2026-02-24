@@ -298,31 +298,95 @@ async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return WAIT_TRIM
 
+# ================= TRIM HANDLER (UPDATED) =================
 async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
         return WAIT_TRIM
     
-    # Check for /skip command
+    # Check for /skip command first
     if msg.text and msg.text.strip().lower() == '/skip':
         context.user_data['trim_file'] = None
         context.user_data['trim_type'] = None
+        logger.info("✅ Trim skipped")
         await msg.reply_text(
             "⏭️ Trim Skipped!\n\n"
-            "✅ Koi dikkat nahi, default thumbnail use hoga.\n\n"
+            "✅ Koi dikkat nahi.\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "📹 STEP 2: FULL QUALITY VIDEOS\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Ab aap sab quality variants bhejo:\n"
-            "📊 480p, 720p, 1080p, 2160p etc.\n\n"
-            "Har quality alag se:\n"
-            "1️⃣ Video 1 (480p)\n"
-            "2️⃣ Video 2 (720p)\n"
-            "3️⃣ Video 3 (1080p)\n"
-            "... aur sab\n\n"
-            "✅ Jab sab ho jaye toh /done likho"
+            "Ab sab quality variants bhejo!\n\n"
+            "✅ /done likho"
         )
         return WAIT_FULL
+    
+    # Media handling
+    media_found = False
+    media_type = None
+    file_id = None
+    
+    if msg.video:
+        media_found = True
+        media_type = 'video'
+        file_id = msg.video.file_id
+        logger.info(f"📹 Video detected (forwarded: {bool(msg.forward_origin)})")
+    elif msg.photo:
+        media_found = True
+        media_type = 'photo'
+        file_id = msg.photo[-1].file_id
+        logger.info("📸 Photo detected")
+    elif msg.document:
+        media_found = True
+        media_type = 'document'
+        file_id = msg.document.file_id
+        logger.info(f"📄 Document detected: {msg.document.file_name}")
+    elif msg.animation:
+        media_found = True
+        media_type = 'animation'
+        file_id = msg.animation.file_id
+        logger.info("🎬 Animation detected")
+    
+    if not media_found:
+        logger.warning(f"❌ Unsupported type from user")
+        await msg.reply_text(
+            "❌ ERROR: Ye video/photo nahi hai!\n\n"
+            "📸 ACCEPTED:\n"
+            "✅ Video (forwarded bhi ho sakte ho)\n"
+            "✅ Photo\n"
+            "✅ Document\n"
+            "✅ GIF/Animation\n\n"
+            "👉 /skip karke aage badho"
+        )
+        return WAIT_TRIM
+    
+    raw_caption = msg.caption if msg.caption else ""
+    cleaned_title = clean_title(raw_caption)
+    
+    context.user_data['title'] = cleaned_title
+    context.user_data['trim_file'] = file_id
+    context.user_data['trim_type'] = media_type
+    context.user_data['trim_chat_id'] = msg.chat_id
+    context.user_data['trim_msg_id'] = msg.message_id
+    
+    logger.info(f"✅ Trim saved: {media_type} - Title: {cleaned_title}")
+    
+    await msg.reply_text(
+        f"✅ Trim {media_type.upper()} Accepted!\n\n"
+        f"📝 Title: {cleaned_title}\n"
+        f"📁 Type: {media_type.upper()}\n"
+        f"{'🔄 (Forwarded)' if msg.forward_origin else '📤 (Original)'}\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📹 STEP 2: FULL QUALITY VIDEOS\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Ab sab quality variants bhejo:\n"
+        "📊 480p, 720p, 1080p, 2160p etc.\n\n"
+        "Har quality separately:\n"
+        "1️⃣ 480p video\n"
+        "2️⃣ 720p video\n"
+        "3️⃣ 1080p video\n\n"
+        "✅ /done likho"
+    )
+    return WAIT_FULL
     
     # Check if it's a video
     if msg.video:
@@ -455,45 +519,56 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_full_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
+        logger.warning("❌ No message object found")
         return WAIT_FULL
+
+    # 🔍 DEBUG: Dekho kya aa raha hai
+    logger.info(f"📨 Message Type Received:")
+    logger.info(f"   - has_video: {bool(msg.video)}")
+    logger.info(f"   - has_document: {bool(msg.document)}")
+    logger.info(f"   - has_animation: {bool(msg.animation)}")
+    logger.info(f"   - has_text: {bool(msg.text)}")
+    logger.info(f"   - is_forwarded: {bool(msg.forward_origin)}")
+    logger.info(f"   - caption: {msg.caption[:50] if msg.caption else 'None'}")
 
     # Check for /done command
     if msg.text and msg.text.strip().lower() == '/done':
+        logger.info("✅ /done command detected")
         return await finalize_single_upload(update, context)
 
     # Check for /cancel command
     if msg.text and msg.text.strip().lower() == '/cancel':
+        logger.info("✅ /cancel command detected")
         context.user_data.clear()
         await msg.reply_text("❌ Upload process cancelled.")
         return ConversationHandler.END
 
     # Accept videos and documents
-    if not msg.video and not msg.document:
+    if not msg.video and not msg.document and not msg.animation:
+        logger.warning(f"❌ Unsupported message type received")
         await msg.reply_text(
-            "❌ ERROR: Video/Document nahi hai!\n\n"
-            "📹 MAIN VIDEO FILES:\n"
-            "✅ .mp4 (Video)\n"
-            "✅ .mkv (Video)\n"
-            "✅ .avi (Document)\n"
-            "✅ .mov (Video)\n"
-            "✅ .flv (Document)\n\n"
-            "COMMANDS:\n"
-            "/done - Finalize upload\n"
-            "/cancel - Cancel process\n\n"
-            "OR\n\n"
-            "👉 Doosra quality variant bhejo"
+            "❌ ERROR: Ye video/document nahi hai!\n\n"
+            "📹 Supported:\n"
+            "✅ Video (.mp4, .mkv, .avi, .mov)\n"
+            "✅ Document\n"
+            "✅ GIF/Animation\n\n"
+            "OR /done likho"
         )
         return WAIT_FULL
 
+    # Process video
     quality = detect_quality_from_message(msg)
-    file_id = msg.video.file_id if msg.video else msg.document.file_id
+    file_id = msg.video.file_id if msg.video else (msg.animation.file_id if msg.animation else msg.document.file_id)
+    
+    logger.info(f"✅ Processing: {quality} - File ID: {file_id[:20]}...")
     
     entry = {
         "quality": quality,
         "file_id": file_id,
         "source_chat_id": msg.chat_id,
         "source_msg_id": msg.message_id,
-        "thumb_file_id": msg.video.thumbnail.file_id if msg.video and msg.video.thumbnail else None
+        "thumb_file_id": msg.video.thumbnail.file_id if msg.video and msg.video.thumbnail else None,
+        "is_forwarded": bool(msg.forward_origin)
     }
     
     context.user_data['quality_payloads'].append(entry)
@@ -504,17 +579,18 @@ async def get_full_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(
         f"✅ {quality} Quality Saved!\n\n"
         f"📊 Total Variants: {saved_count}\n"
-        f"📋 List: {qualities_list}\n\n"
+        f"📋 List: {qualities_list}\n"
+        f"{'🔄 (Forwarded)' if msg.forward_origin else '📤 (Original)'}\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "➕ AUR QUALITY VARIANTS:\n"
         "👉 Doosra quality variant bhejo\n\n"
         "✅ FINALIZE:\n"
-        "👉 /done likho (sab upload start hoga)\n\n"
+        "👉 /done likho\n\n"
         "❌ CANCEL:\n"
         "👉 /cancel likho"
     )
+    logger.info(f"✅ Quality saved. Current count: {saved_count}")
     return WAIT_FULL
-
 
 async def finalize_single_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     quality_payloads = context.user_data.get("quality_payloads", [])
@@ -998,29 +1074,39 @@ async def run_bots():
     main_app = Application.builder().token(MAIN_BOT_TOKEN).build()
     
     # Properly indented upload_conv block
-    upload_conv = ConversationHandler(
-        entry_points=[CommandHandler('post', start_upload)],
-        states={
-            WAIT_TRIM: [
-                MessageHandler(filters.VIDEO, get_trim),
-                MessageHandler(filters.PHOTO, get_trim),
-                MessageHandler(filters.Document.VIDEO, get_trim),
-                MessageHandler(filters.Document.ALL, get_trim),
-                MessageHandler(filters.ANIMATION, get_trim),
-                MessageHandler(filters.COMMAND, get_trim),
-                MessageHandler(filters.TEXT, get_trim),
-            ],
-            WAIT_FULL: [
-                MessageHandler(filters.VIDEO, get_full_video),
-                MessageHandler(filters.Document.VIDEO, get_full_video),
-                MessageHandler(filters.Document.ALL, get_full_video),
-                MessageHandler(filters.COMMAND, get_full_video),
-                MessageHandler(filters.TEXT, get_full_video),
-            ]
-        },
-        fallbacks=[CommandHandler('cancel', cancel_flow)]
-    )
-    main_app.add_handler(upload_conv)
+    # In run_bots() function:
+
+upload_conv = ConversationHandler(
+    entry_points=[CommandHandler('post', start_upload)],
+    states={
+        WAIT_TRIM: [
+            # All media types
+            MessageHandler(
+                filters.VIDEO | filters.PHOTO | filters.ANIMATION | 
+                filters.Document.VIDEO | filters.Document.ALL,
+                get_trim
+            ),
+            # Commands
+            MessageHandler(filters.COMMAND, get_trim),
+            # Text fallback
+            MessageHandler(filters.TEXT, get_trim),
+        ],
+        WAIT_FULL: [
+            # All video types including forwarded
+            MessageHandler(
+                filters.VIDEO | filters.Document.VIDEO | filters.ANIMATION | 
+                filters.Document.ALL,
+                get_full_video
+            ),
+            # Commands (for /done, /cancel, /skip)
+            MessageHandler(filters.COMMAND, get_full_video),
+            # Text fallback
+            MessageHandler(filters.TEXT, get_full_video),
+        ]
+    },
+    fallbacks=[CommandHandler('cancel', cancel_flow)]
+)
+main_app.add_handler(upload_conv)
     
     bulk_conv = ConversationHandler(
         entry_points=[CommandHandler('bulk', start_bulk_upload)],
