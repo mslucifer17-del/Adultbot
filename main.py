@@ -138,6 +138,16 @@ def get_db_connection():
 
 # ================= HELPER FUNCTIONS =================
 
+async def schedule_delete(context, chat_id, message_id, delay=120):
+    """Delete single message after delay (default 2 min)"""
+    try:
+        await asyncio.sleep(delay)
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        logger.info(f"🗑️ Text msg {message_id} deleted from {chat_id}")
+    except Exception as e:
+        logger.error(f"Text delete error {message_id}: {e}")
+
+
 def construct_file_url(channel_id, message_id):
     channel_str = str(channel_id)
     if channel_str.startswith('-100'):
@@ -361,7 +371,7 @@ async def auto_delete_with_notification(context, chat_id, message_ids_to_delete,
             except Exception as e:
                 logger.error(f"Failed to delete message {msg_id}: {e}")
         try:
-            await context.bot.send_message(
+            final_notice = await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
                     "🗑️ Video(s) Auto-Deleted!\n\n"
@@ -369,6 +379,7 @@ async def auto_delete_with_notification(context, chat_id, message_ids_to_delete,
                     "❌ Nahi kiya toh dobara link se access karein."
                 )
             )
+            asyncio.create_task(schedule_delete(context, chat_id, final_notice.message_id, 120))
         except Exception as e:
             logger.error(f"Final notice error: {e}")
     except Exception as e:
@@ -1086,12 +1097,16 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     db_pool.putconn(conn)
 
             if not title:
-                await update.message.reply_text(
+                err = await update.message.reply_text(
                     "❌ Video Not Found!\n\nYeh video delete ho chuki hai ya invalid link hai."
                 )
+                asyncio.create_task(schedule_delete(context, chat_id, err.message_id, 120))
+                asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, 120))
                 return
             if not qualities:
-                await update.message.reply_text("❌ No video files found. Contact admin.")
+                err = await update.message.reply_text("❌ No video files found. Contact admin.")
+                asyncio.create_task(schedule_delete(context, chat_id, err.message_id, 120))
+                asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, 120))
                 return
 
             # Single quality - send directly
@@ -1099,6 +1114,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_video_to_user(
                     update, context, chat_id, user_name, title, qualities[0]
                 )
+                asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, 120))
                 return
 
             # Multiple qualities - show selection
@@ -1119,7 +1135,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )]
             )
 
-            await update.message.reply_text(
+            selection_msg = await update.message.reply_text(
                 f"👋 Hello <b>{html_escape(user_name)}</b>!\n\n"
                 f"🎬 <b>{html_escape(title)}</b>\n\n"
                 f"📊 <b>Select Quality:</b>\n\n"
@@ -1128,11 +1144,17 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
+            asyncio.create_task(schedule_delete(context, chat_id, selection_msg.message_id, 120))
+            asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, 120))
         except ValueError:
-            await update.message.reply_text("❌ Invalid video ID.")
+            err = await update.message.reply_text("❌ Invalid video ID.")
+            asyncio.create_task(schedule_delete(context, chat_id, err.message_id, 120))
+            asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, 120))
         except Exception as e:
             logger.error(f"Provider Error: {e}")
-            await update.message.reply_text("❌ Something went wrong. Try again.")
+            err = await update.message.reply_text("❌ Something went wrong. Try again.")
+            asyncio.create_task(schedule_delete(context, chat_id, err.message_id, 120))
+            asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, 120))
         return
 
     # ===== NORMAL /start - USER WELCOME MENU =====
@@ -1157,7 +1179,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👨‍💻 Contact Admin", url="https://t.me/ownermahi")]
     ]
 
-    await update.message.reply_text(
+    welcome = await update.message.reply_text(
         f"🔞 <b>Welcome {html_escape(user_name)}!</b>\n\n"
         f"🎬 Premium Videos sirf {SUBSCRIPTION_AMOUNT}₹/month mein.\n\n"
         f"📌 <b>Features:</b>\n"
@@ -1169,6 +1191,8 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    asyncio.create_task(schedule_delete(context, chat_id, welcome.message_id, 120))
+    asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, 120))
 
 
 async def provider_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1176,10 +1200,12 @@ async def provider_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('screenshot_id', None)
     context.user_data.pop('qr_expiry', None)
     context.user_data.pop('payment_note', None)
-    await update.message.reply_text(
+    cancel_msg = await update.message.reply_text(
         "❌ <b>Cancelled!</b>\n\nDobara /start type karein.",
         parse_mode='HTML'
     )
+    asyncio.create_task(schedule_delete(context, update.effective_chat.id, cancel_msg.message_id, 120))
+    asyncio.create_task(schedule_delete(context, update.effective_chat.id, update.message.message_id, 120))
 
 
 async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1197,12 +1223,13 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
         is_active, end_date = check_active_subscription(user.id)
         if is_active and end_date:
             remaining = (end_date - datetime.now()).days
-            await query.message.reply_text(
+            active_msg = await query.message.reply_text(
                 f"✅ <b>Tumhari subscription already active hai!</b>\n\n"
                 f"📅 Expires: {end_date.strftime('%d-%m-%Y')}\n"
                 f"⏳ {remaining} days remaining",
                 parse_mode='HTML'
             )
+            asyncio.create_task(schedule_delete(context, chat_id, active_msg.message_id, 120))
             return
 
         # ===== GENERATE DYNAMIC QR CODE =====
@@ -1216,7 +1243,7 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
         context.user_data['qr_expiry'] = expiry_time
         context.user_data['payment_note'] = note
 
-        await query.message.reply_photo(
+        qr_msg = await query.message.reply_photo(
             photo=qr_image,
             caption=(
                 f"💎 <b>VIP Subscription - {amount}₹ / Month</b>\n\n"
@@ -1241,6 +1268,8 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
             ),
             parse_mode='HTML'
         )
+        # QR image 10 min baad delete (validity ke saath)
+        asyncio.create_task(schedule_delete(context, chat_id, qr_msg.message_id, 600))
         return
 
     # ========== QUALITY SELECTION ==========
@@ -1440,6 +1469,7 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
 
 async def provider_handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+    chat_id = msg.chat_id
     payment_step = context.user_data.get('payment_step')
 
     if payment_step == 'screenshot':
@@ -1450,42 +1480,51 @@ async def provider_handle_photo(update: Update, context: ContextTypes.DEFAULT_TY
             context.user_data.pop('qr_expiry', None)
             context.user_data.pop('payment_note', None)
             context.user_data.pop('screenshot_id', None)
-            await msg.reply_text(
+            expired_msg = await msg.reply_text(
                 "❌ <b>QR Code Expired!</b>\n\n"
                 "⏰ 10 minute ka time khatam ho gaya.\n"
                 "🔁 Naya QR lene ke liye /start → Buy VIP dabao.\n\n"
                 "⚠️ Agar payment ho gaya hai toh admin se contact karo: @ownermahi",
                 parse_mode='HTML'
             )
+            asyncio.create_task(schedule_delete(context, chat_id, expired_msg.message_id, 120))
+            asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 120))
             return
 
         context.user_data['screenshot_id'] = msg.photo[-1].file_id
         context.user_data['payment_step'] = 'utr'
-        await msg.reply_text(
+        receipt = await msg.reply_text(
             "✅ <b>Screenshot Received!</b>\n\n"
             "🔢 Ab <b>UTR ya Reference Number</b> type karke bhejein.\n\n"
             "💡 UTR number payment SMS ya app mein milta hai.\n\n"
             "❌ Cancel: /cancel",
             parse_mode='HTML'
         )
+        asyncio.create_task(schedule_delete(context, chat_id, receipt.message_id, 120))
+        asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 120))
         return
 
-    await msg.reply_text(
+    err = await msg.reply_text(
         "📸 Photo received, lekin koi active process nahi hai.\n\n"
         "👉 /start type karein menu dekhne ke liye."
     )
+    asyncio.create_task(schedule_delete(context, chat_id, err.message_id, 120))
+    asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 120))
 
 
 async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
+    chat_id = msg.chat_id
     payment_step = context.user_data.get('payment_step')
 
     if payment_step == 'utr':
         utr_number = msg.text.strip()
         if len(utr_number) < 4:
-            await msg.reply_text(
+            short_err = await msg.reply_text(
                 "❌ UTR number bahut chota hai. Sahi UTR bhejein.\n❌ Cancel: /cancel"
             )
+            asyncio.create_task(schedule_delete(context, chat_id, short_err.message_id, 120))
+            asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 120))
             return
 
         screenshot_id = context.user_data.get('screenshot_id')
@@ -1524,14 +1563,16 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
             )
         except Exception as e:
             logger.error(f"Failed to send payment to admin: {e}")
-            await msg.reply_text("❌ Error! Please try again or contact @ownermahi")
+            admin_err = await msg.reply_text("❌ Error! Please try again or contact @ownermahi")
+            asyncio.create_task(schedule_delete(context, chat_id, admin_err.message_id, 120))
+            asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 120))
             context.user_data.pop('payment_step', None)
             context.user_data.pop('screenshot_id', None)
             context.user_data.pop('qr_expiry', None)
             context.user_data.pop('payment_note', None)
             return
 
-        await msg.reply_text(
+        pending_msg = await msg.reply_text(
             "⏳ <b>Verification Pending!</b>\n\n"
             "✅ Payment details admin ko bhej di gayi.\n"
             "🕒 Admin verify karte hi VIP link mil jayega.\n\n"
@@ -1539,6 +1580,8 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
             "❓ Problem? @ownermahi",
             parse_mode='HTML'
         )
+        asyncio.create_task(schedule_delete(context, chat_id, pending_msg.message_id, 120))
+        asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 120))
 
         context.user_data.pop('payment_step', None)
         context.user_data.pop('screenshot_id', None)
@@ -1547,18 +1590,22 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if payment_step == 'screenshot':
-        await msg.reply_text(
+        photo_err = await msg.reply_text(
             "❌ Photo chahiye! Payment ka <b>Screenshot (photo)</b> bhejein.\n\n"
             "❌ Cancel: /cancel",
             parse_mode='HTML'
         )
+        asyncio.create_task(schedule_delete(context, chat_id, photo_err.message_id, 120))
+        asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 120))
         return
 
-    await msg.reply_text(
+    err = await msg.reply_text(
         "🤔 Samajh nahi aaya.\n\n"
         "👉 /start type karein menu dekhne ke liye.\n"
         "👉 Video ke liye free channel ka link use karein."
     )
+    asyncio.create_task(schedule_delete(context, chat_id, err.message_id, 120))
+    asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 120))
 
 
 # ================================================================
@@ -1573,7 +1620,7 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
     # ===== DETECT OLD file_id vs NEW file_url =====
     is_old_file_id = not file_url.startswith("https://t.me/c/") if file_url else False
 
-    # Warning message
+    # Warning message - 10 sec mein delete
     try:
         warning_msg = await context.bot.send_message(
             chat_id=chat_id,
@@ -1585,11 +1632,8 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
                 "⏳ Sending..."
             )
         )
-        await asyncio.sleep(2)
-        try:
-            await warning_msg.delete()
-        except:
-            pass
+        # 10 sec mein delete - video aane se pehle hi
+        asyncio.create_task(schedule_delete(context, chat_id, warning_msg.message_id, 10))
     except Exception as e:
         logger.error(f"Warning msg error: {e}")
 
@@ -1616,11 +1660,12 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
         except Exception as e:
             logger.error(f"❌ Old file_id send failed: {e}")
             try:
-                await context.bot.send_message(
+                err = await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"❌ Error sending {q_label}. Contact @ownermahi",
                     parse_mode='HTML'
                 )
+                asyncio.create_task(schedule_delete(context, chat_id, err.message_id, 120))
             except:
                 pass
     else:
@@ -1630,10 +1675,11 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
         if not backup_channel_id or not backup_msg_id:
             logger.error(f"❌ Invalid file_url: {file_url}")
             try:
-                await context.bot.send_message(
+                err = await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"❌ Invalid file URL for {q_label}. Contact @ownermahi"
                 )
+                asyncio.create_task(schedule_delete(context, chat_id, err.message_id, 120))
             except:
                 pass
             return None
@@ -1650,23 +1696,23 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
         except Exception as e:
             logger.error(f"❌ Copy from backup failed: {e} | URL: {file_url}")
             try:
-                await context.bot.send_message(
+                err = await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"❌ Error sending {q_label}. File may be deleted. Contact @ownermahi"
                 )
+                asyncio.create_task(schedule_delete(context, chat_id, err.message_id, 120))
             except:
                 pass
 
-    if return_msg_id:
-        return sent_msg_id
-
-    if sent_msg_id:
+    # Video file → 5 min delete with warning system
+    if sent_msg_id and not return_msg_id:
         asyncio.create_task(
             auto_delete_with_notification(
                 context=context, chat_id=chat_id,
-                message_ids_to_delete=sent_msg_id, delete_time=AUTO_DELETE_TIME
+                message_ids_to_delete=[sent_msg_id], delete_time=AUTO_DELETE_TIME
             )
         )
+
     return sent_msg_id
 
 
@@ -1841,6 +1887,7 @@ async def run_bots():
         logger.info(f"📌 File URL Mode: Active")
         logger.info(f"📌 Duplicate Check: File Size based")
         logger.info(f"📌 UPI QR Code: Dynamic Generation Active")
+        logger.info(f"📌 Auto-Delete: Text=2min, Video=5min, QR=10min")
         logger.info("=" * 50)
 
         asyncio.create_task(periodic_cleanup(None))
