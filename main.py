@@ -5,6 +5,7 @@ import asyncio
 import logging
 import aiohttp
 import psycopg2
+import qrcode
 from html import escape as html_escape
 from psycopg2 import pool
 from flask import Flask, redirect
@@ -74,9 +75,6 @@ def setup_db():
             )
         """)
 
-        # ===== NEW SCHEMA: file_url instead of file_id =====
-        # file_url stores: https://t.me/c/CHANNEL_ID/MSG_ID
-        # No more file_id, backup_msg_id, backup_channel_id
         cur.execute("""
             CREATE TABLE IF NOT EXISTS video_qualities (
                 quality_id SERIAL PRIMARY KEY,
@@ -111,15 +109,12 @@ def setup_db():
             existing_cols = [row[0] for row in cur.fetchall()]
 
             if existing_cols:
-                # Rename file_id → file_url if needed
                 if 'file_id' in existing_cols and 'file_url' not in existing_cols:
                     cur.execute("ALTER TABLE video_qualities RENAME COLUMN file_id TO file_url")
                     logger.info("✅ Migrated: file_id → file_url")
                 elif 'file_url' not in existing_cols:
                     cur.execute("ALTER TABLE video_qualities ADD COLUMN file_url TEXT")
                     logger.info("✅ Added file_url column")
-
-                # Old columns left as-is (won't break anything)
         except Exception as e:
             logger.warning(f"Migration note: {e}")
 
@@ -144,10 +139,6 @@ def get_db_connection():
 # ================= HELPER FUNCTIONS =================
 
 def construct_file_url(channel_id, message_id):
-    """
-    Build backup URL: https://t.me/c/2683355160/2969
-    channel_id = -1002683355160  →  strip '-100'  →  2683355160
-    """
     channel_str = str(channel_id)
     if channel_str.startswith('-100'):
         channel_str = channel_str[4:]
@@ -157,10 +148,6 @@ def construct_file_url(channel_id, message_id):
 
 
 def parse_file_url(file_url):
-    """
-    Parse https://t.me/c/2683355160/2969
-    Returns (channel_id=-1002683355160, msg_id=2969) or (None, None)
-    """
     if not file_url:
         return None, None
     match = re.match(r'https://t\.me/c/(\d+)/(\d+)', file_url)
@@ -262,6 +249,45 @@ def format_file_size(size_bytes):
         return f"{size_bytes / (1024 * 1024):.1f} MB"
     else:
         return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+
+def generate_upi_qr(user_id, user_name, amount):
+    """
+    Generate UPI QR code with pre-filled amount and note.
+    Returns BytesIO image object and note string.
+    """
+    safe_name = re.sub(r'[^a-zA-Z0-9 ]', '', user_name)[:30].strip()
+    if not safe_name:
+        safe_name = "User"
+
+    note = f"TG-{user_id}-{safe_name}"
+
+    upi_url = (
+        f"upi://pay"
+        f"?pa={UPI_ID}"
+        f"&pn=VIP Subscription"
+        f"&am={amount}"
+        f"&tn={note}"
+        f"&cu=INR"
+    )
+
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(upi_url)
+    qr.make(fit=True)
+
+    img = qr.make_image(fill_color="black", back_color="white")
+
+    bio = BytesIO()
+    img.save(bio, format='PNG')
+    bio.seek(0)
+    bio.name = f"qr_{user_id}.png"
+
+    return bio, note
 
 
 def build_free_channel_caption(title, gplink, qualities_info):
@@ -668,7 +694,7 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"❌ Backup1 FAILED for {q_label}: {e}")
             failed_qualities.append(q_label)
-            continue  # Skip this quality - no URL = can't serve later
+            continue
 
         # Copy to other channels (optional, not stored)
         for ch_id in [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]:
@@ -933,7 +959,7 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
                 logger.info(f"✅ Bulk backup: {title} {q_label} → {file_url}")
             except Exception as e:
                 logger.error(f"❌ Backup1 FAILED {title} {q_label}: {e}")
-                continue  # Skip - no URL = can't serve
+                continue
 
             # Copy to other channels (optional)
             for ch_id in [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]:
@@ -1023,6 +1049,8 @@ async def cancel_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('payment_step', None)
     context.user_data.pop('screenshot_id', None)
+    context.user_data.pop('qr_expiry', None)
+    context.user_data.pop('payment_note', None)
 
     text = update.message.text
     chat_id = update.effective_chat.id
@@ -1045,7 +1073,6 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 video_result = cur.fetchone()
                 if video_result:
                     title = video_result[0]
-                    # ===== FETCH file_url INSTEAD OF file_id =====
                     cur.execute(
                         """SELECT quality_id, quality_label, file_url, file_size
                            FROM video_qualities WHERE vid_id = %s
@@ -1126,7 +1153,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💎 Buy VIP ({SUBSCRIPTION_AMOUNT}₹/Month)",
             callback_data="buy_sub"
         )],
-        [InlineKeyboardButton("🆓 Free Channel", url="https://t.me/+wcYoTQhIz-ZmOTY1")]
+        [InlineKeyboardButton("🆓 Free Channel", url="https://t.me/+wcYoTQhIz-ZmOTY1")],
         [InlineKeyboardButton("👨‍💻 Contact Admin", url="https://t.me/ownermahi")]
     ]
 
@@ -1147,6 +1174,8 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def provider_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('payment_step', None)
     context.user_data.pop('screenshot_id', None)
+    context.user_data.pop('qr_expiry', None)
+    context.user_data.pop('payment_note', None)
     await update.message.reply_text(
         "❌ <b>Cancelled!</b>\n\nDobara /start type karein.",
         parse_mode='HTML'
@@ -1176,17 +1205,40 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
             )
             return
 
+        # ===== GENERATE DYNAMIC QR CODE =====
+        amount = SUBSCRIPTION_AMOUNT
+        qr_image, note = generate_upi_qr(user.id, user_name, amount)
+
+        # QR validity time (10 minutes)
+        qr_validity_minutes = 10
+        expiry_time = datetime.now() + timedelta(minutes=qr_validity_minutes)
         context.user_data['payment_step'] = 'screenshot'
-        await query.message.reply_text(
-            f"💎 <b>VIP Subscription - {SUBSCRIPTION_AMOUNT}₹ / Month</b>\n\n"
-            f"💳 <b>UPI ID:</b> <code>{UPI_ID}</code>\n\n"
-            f"⚠️ <b>Steps:</b>\n"
-            f"1️⃣ Upar diye gaye UPI par {SUBSCRIPTION_AMOUNT}₹ pay karein\n"
-            f"2️⃣ Payment ka <b>Screenshot</b> yahan bhejein\n"
-            f"3️⃣ Phir <b>UTR/Reference Number</b> bhejein\n"
-            f"4️⃣ Admin verify karke VIP link bhejega!\n\n"
-            f"📸 <b>Ab payment screenshot (photo) bhejo...</b>\n\n"
-            f"❌ Cancel: /cancel",
+        context.user_data['qr_expiry'] = expiry_time
+        context.user_data['payment_note'] = note
+
+        await query.message.reply_photo(
+            photo=qr_image,
+            caption=(
+                f"💎 <b>VIP Subscription - {amount}₹ / Month</b>\n\n"
+                f"📱 <b>Scan QR Code</b> from any UPI app:\n"
+                f"  • Google Pay\n"
+                f"  • PhonePe\n"
+                f"  • Paytm\n"
+                f"  • Any UPI App\n\n"
+                f"💰 Amount: <b>₹{amount}</b> (pre-filled)\n"
+                f"📝 Note: <code>{note}</code> (auto-filled)\n\n"
+                f"⚠️ <b>Important:</b>\n"
+                f"  • Amount change MAT karna\n"
+                f"  • Note/Remark change MAT karna\n"
+                f"  • QR valid for <b>{qr_validity_minutes} minutes</b> only\n"
+                f"  • Expiry: <b>{expiry_time.strftime('%H:%M:%S')}</b>\n\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"✅ Payment ke baad:\n"
+                f"1️⃣ Payment ka <b>Screenshot</b> bhejo\n"
+                f"2️⃣ Phir <b>UTR/Reference Number</b> bhejo\n\n"
+                f"📸 <b>Ab payment karo aur screenshot bhejo...</b>\n\n"
+                f"❌ Cancel: /cancel"
+            ),
             parse_mode='HTML'
         )
         return
@@ -1203,7 +1255,6 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
             cur.execute("SELECT title FROM adult_videos WHERE vid_id = %s", (vid_id,))
             vid_result = cur.fetchone()
             title = vid_result[0] if vid_result else "Unknown"
-            # ===== FETCH file_url =====
             cur.execute(
                 """SELECT quality_id, quality_label, file_url, file_size
                    FROM video_qualities WHERE quality_id = %s""",
@@ -1239,7 +1290,6 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
             cur.execute("SELECT title FROM adult_videos WHERE vid_id = %s", (vid_id,))
             vid_result = cur.fetchone()
             title = vid_result[0] if vid_result else "Unknown"
-            # ===== FETCH file_url =====
             cur.execute(
                 """SELECT quality_id, quality_label, file_url, file_size
                    FROM video_qualities WHERE vid_id = %s ORDER BY file_size ASC""",
@@ -1393,6 +1443,22 @@ async def provider_handle_photo(update: Update, context: ContextTypes.DEFAULT_TY
     payment_step = context.user_data.get('payment_step')
 
     if payment_step == 'screenshot':
+        # ===== CHECK QR EXPIRY =====
+        qr_expiry = context.user_data.get('qr_expiry')
+        if qr_expiry and datetime.now() > qr_expiry:
+            context.user_data.pop('payment_step', None)
+            context.user_data.pop('qr_expiry', None)
+            context.user_data.pop('payment_note', None)
+            context.user_data.pop('screenshot_id', None)
+            await msg.reply_text(
+                "❌ <b>QR Code Expired!</b>\n\n"
+                "⏰ 10 minute ka time khatam ho gaya.\n"
+                "🔁 Naya QR lene ke liye /start → Buy VIP dabao.\n\n"
+                "⚠️ Agar payment ho gaya hai toh admin se contact karo: @ownermahi",
+                parse_mode='HTML'
+            )
+            return
+
         context.user_data['screenshot_id'] = msg.photo[-1].file_id
         context.user_data['payment_step'] = 'utr'
         await msg.reply_text(
@@ -1423,6 +1489,7 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
             return
 
         screenshot_id = context.user_data.get('screenshot_id')
+        payment_note = context.user_data.get('payment_note', 'N/A')
         user = update.effective_user
         username_text = f"@{user.username}" if user.username else "N/A"
 
@@ -1446,8 +1513,10 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
                     f"🆔 ID: <code>{user.id}</code>\n"
                     f"📱 Username: {username_text}\n"
                     f"🔢 UTR: <code>{utr_number}</code>\n"
+                    f"📝 UPI Note: <code>{payment_note}</code>\n"
                     f"💰 Amount: {SUBSCRIPTION_AMOUNT}₹\n"
                     f"📅 Date: {datetime.now().strftime('%d-%m-%Y %H:%M')}\n\n"
+                    f"💡 UPI mein <code>{payment_note}</code> search karo verify ke liye\n\n"
                     f"👇 Verify karke approve/reject karein:"
                 ),
                 parse_mode='HTML',
@@ -1458,6 +1527,8 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
             await msg.reply_text("❌ Error! Please try again or contact @ownermahi")
             context.user_data.pop('payment_step', None)
             context.user_data.pop('screenshot_id', None)
+            context.user_data.pop('qr_expiry', None)
+            context.user_data.pop('payment_note', None)
             return
 
         await msg.reply_text(
@@ -1471,6 +1542,8 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
         context.user_data.pop('payment_step', None)
         context.user_data.pop('screenshot_id', None)
+        context.user_data.pop('qr_expiry', None)
+        context.user_data.pop('payment_note', None)
         return
 
     if payment_step == 'screenshot':
@@ -1767,6 +1840,7 @@ async def run_bots():
         logger.info(f"📌 Backup Channel: {BACKUP_1}")
         logger.info(f"📌 File URL Mode: Active")
         logger.info(f"📌 Duplicate Check: File Size based")
+        logger.info(f"📌 UPI QR Code: Dynamic Generation Active")
         logger.info("=" * 50)
 
         asyncio.create_task(periodic_cleanup(None))
