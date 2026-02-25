@@ -1,3 +1,4 @@
+qrcode[pil]
 fuzzywuzzy==0.18.0
 python-Levenshtein>=0.12.0
 python-telegram-bot==20.7
