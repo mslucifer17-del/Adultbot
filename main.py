@@ -100,7 +100,6 @@ def setup_db():
             )
         """)
 
-        # ===== MIGRATION: old schema → new schema =====
         try:
             cur.execute("""
                 SELECT column_name FROM information_schema.columns
@@ -262,10 +261,6 @@ def format_file_size(size_bytes):
 
 
 def generate_upi_qr(user_id, user_name, amount):
-    """
-    Generate UPI QR code with pre-filled amount and note.
-    Returns BytesIO image object and note string.
-    """
     safe_name = re.sub(r'[^a-zA-Z0-9 ]', '', user_name)[:30].strip()
     if not safe_name:
         safe_name = "User"
@@ -606,7 +601,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     if video_obj:
         duration = video_obj.duration or 0
 
-    # ===== DUPLICATE CHECK: FILE SIZE BASED =====
     full_videos = context.user_data.get('full_videos', [])
     for existing in full_videos:
         if existing['file_size'] == file_size and file_size > 0:
@@ -659,7 +653,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     total = len(full_videos)
     status = await msg.reply_text(f"⏳ Processing {total} quality(ies)...")
 
-    # Create video entry in DB
     conn = None
     vid_id = None
     try:
@@ -693,7 +686,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
 
         backup_caption = build_backup_caption(title, q_label)
 
-        # ===== COPY TO BACKUP_1 AND GET file_url =====
         file_url = None
         try:
             copied_msg = await context.bot.copy_message(
@@ -707,7 +699,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
             failed_qualities.append(q_label)
             continue
 
-        # Copy to other channels (optional, not stored)
         for ch_id in [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]:
             try:
                 await context.bot.copy_message(
@@ -717,7 +708,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
             except Exception as e:
                 logger.error(f"Channel {ch_id} copy error: {e}")
 
-        # ===== SAVE file_url TO DATABASE =====
         conn2 = None
         try:
             conn2 = get_db_connection()
@@ -754,12 +744,10 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.clear()
         return ConversationHandler.END
 
-    # Generate GPLink
     await status.edit_text("⏳ Generating link...")
     web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
     gplink = await shorten_link(web_link)
 
-    # Post to Free Channel
     await status.edit_text("⏳ Posting to Free Channel...")
     caption = build_free_channel_caption(title, gplink, qualities_info)
 
@@ -795,7 +783,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logger.error(f"Free channel error: {e}")
 
-    # Final report
     quality_list = "\n".join([f"  • {q['label']} ({q['size']})" for q in qualities_info])
     url_list = "\n".join([f"  📎 {q['url']}" for q in qualities_info])
     failed_text = ""
@@ -882,7 +869,6 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if title not in bulk_videos:
         bulk_videos[title] = []
 
-    # ===== DUPLICATE CHECK: FILE SIZE BASED =====
     existing_sizes = [v['file_size'] for v in bulk_videos[title]]
     if file_size in existing_sizes and file_size > 0:
         await msg.reply_text(
@@ -959,7 +945,6 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             q_label = vdata['quality_label']
             backup_caption = build_backup_caption(title, q_label)
 
-            # ===== COPY TO BACKUP_1 AND GET file_url =====
             file_url = None
             try:
                 copied = await context.bot.copy_message(
@@ -972,7 +957,6 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
                 logger.error(f"❌ Backup1 FAILED {title} {q_label}: {e}")
                 continue
 
-            # Copy to other channels (optional)
             for ch_id in [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]:
                 try:
                     await context.bot.copy_message(
@@ -982,7 +966,6 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
                 except Exception as e:
                     logger.error(f"Channel {ch_id} error: {e}")
 
-            # ===== SAVE file_url TO DB =====
             conn2 = None
             try:
                 conn2 = get_db_connection()
@@ -1012,7 +995,6 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             results.append(f"❌ {generate_display_title(title)}: All backups failed!")
             continue
 
-        # Generate link and post to free channel
         web_link = f"{WEB_DOMAIN}/watch/{vid_id}"
         gplink = await shorten_link(web_link)
         caption = build_free_channel_caption(title, gplink, qualities_info)
@@ -1109,43 +1091,48 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, 120))
                 return
 
-            # Single quality - send directly
-            if len(qualities) == 1:
-                await send_video_to_user(
-                    update, context, chat_id, user_name, title, qualities[0]
-                )
-                asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, 120))
-                return
-
-            # Multiple qualities - show selection
-            keyboard = []
-            for q in qualities:
-                q_id, q_label, file_url, file_size = q
-                size_str = format_file_size(file_size)
-                keyboard.append(
-                    [InlineKeyboardButton(
-                        f"📹 {q_label} ({size_str})",
-                        callback_data=f"quality_{vid_id}_{q_id}"
-                    )]
-                )
-            keyboard.append(
-                [InlineKeyboardButton(
-                    "📦 Download All Qualities",
-                    callback_data=f"allquality_{vid_id}"
-                )]
+            # ===== EK WARNING PEHLE, PHIR SAARI QUALITIES SEEDHA BHEJ DO =====
+            quality_list_text = "\n".join(
+                [f"  • {q[1]} ({format_file_size(q[3])})" for q in qualities]
             )
+            try:
+                warning_msg = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"👋 Hello <b>{html_escape(user_name)}</b>!\n\n"
+                        f"🎬 <b>{html_escape(title)}</b>\n"
+                        f"📊 Total Qualities: <b>{len(qualities)}</b>\n\n"
+                        f"{quality_list_text}\n\n"
+                        f"⚠️ Videos 5 min baad auto-delete hongi!\n"
+                        f"💾 Saved Messages mein forward kar lo!\n\n"
+                        f"⏳ Sending all qualities..."
+                    ),
+                    parse_mode='HTML'
+                )
+                asyncio.create_task(schedule_delete(context, chat_id, warning_msg.message_id, 15))
+            except Exception as e:
+                logger.error(f"Warning msg error: {e}")
 
-            selection_msg = await update.message.reply_text(
-                f"👋 Hello <b>{html_escape(user_name)}</b>!\n\n"
-                f"🎬 <b>{html_escape(title)}</b>\n\n"
-                f"📊 <b>Select Quality:</b>\n\n"
-                f"⚠️ Videos auto-delete after 5 minutes!\n"
-                f"💾 Forward to Saved Messages immediately!",
-                parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            asyncio.create_task(schedule_delete(context, chat_id, selection_msg.message_id, 120))
+            # SAARI QUALITIES BHEJO BINA INDIVIDUAL WARNING KE
+            sent_msg_ids = []
+            for quality in qualities:
+                msg_id = await send_video_to_user(
+                    update, context, chat_id, user_name, title, quality,
+                    is_callback=False, return_msg_id=True, skip_warning=True
+                )
+                if msg_id:
+                    sent_msg_ids.append(msg_id)
+                await asyncio.sleep(1)
+
+            if sent_msg_ids:
+                asyncio.create_task(
+                    auto_delete_with_notification(
+                        context=context, chat_id=chat_id,
+                        message_ids_to_delete=sent_msg_ids, delete_time=AUTO_DELETE_TIME
+                    )
+                )
             asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, 120))
+
         except ValueError:
             err = await update.message.reply_text("❌ Invalid video ID.")
             asyncio.create_task(schedule_delete(context, chat_id, err.message_id, 120))
@@ -1232,11 +1219,9 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
             asyncio.create_task(schedule_delete(context, chat_id, active_msg.message_id, 120))
             return
 
-        # ===== GENERATE DYNAMIC QR CODE =====
         amount = SUBSCRIPTION_AMOUNT
         qr_image, note = generate_upi_qr(user.id, user_name, amount)
 
-        # QR validity time (10 minutes)
         qr_validity_minutes = 10
         expiry_time = datetime.now() + timedelta(minutes=qr_validity_minutes)
         context.user_data['payment_step'] = 'screenshot'
@@ -1268,94 +1253,7 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
             ),
             parse_mode='HTML'
         )
-        # QR image 10 min baad delete (validity ke saath)
         asyncio.create_task(schedule_delete(context, chat_id, qr_msg.message_id, 600))
-        return
-
-    # ========== QUALITY SELECTION ==========
-    if data.startswith("quality_"):
-        parts = data.split("_")
-        vid_id = int(parts[1])
-        quality_id = int(parts[2])
-        conn = None
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT title FROM adult_videos WHERE vid_id = %s", (vid_id,))
-            vid_result = cur.fetchone()
-            title = vid_result[0] if vid_result else "Unknown"
-            cur.execute(
-                """SELECT quality_id, quality_label, file_url, file_size
-                   FROM video_qualities WHERE quality_id = %s""",
-                (quality_id,)
-            )
-            quality = cur.fetchone()
-            cur.close()
-        finally:
-            if conn:
-                db_pool.putconn(conn)
-
-        if not quality:
-            await query.edit_message_text("❌ Quality not found!")
-            return
-
-        try:
-            await query.message.delete()
-        except:
-            pass
-
-        await send_video_to_user(
-            update, context, chat_id, user_name, title, quality, is_callback=True
-        )
-        return
-
-    # ========== ALL QUALITIES ==========
-    if data.startswith("allquality_"):
-        vid_id = int(data.split("_")[1])
-        conn = None
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("SELECT title FROM adult_videos WHERE vid_id = %s", (vid_id,))
-            vid_result = cur.fetchone()
-            title = vid_result[0] if vid_result else "Unknown"
-            cur.execute(
-                """SELECT quality_id, quality_label, file_url, file_size
-                   FROM video_qualities WHERE vid_id = %s ORDER BY file_size ASC""",
-                (vid_id,)
-            )
-            qualities = cur.fetchall()
-            cur.close()
-        finally:
-            if conn:
-                db_pool.putconn(conn)
-
-        if not qualities:
-            await query.edit_message_text("❌ No qualities found!")
-            return
-
-        try:
-            await query.message.delete()
-        except:
-            pass
-
-        sent_msg_ids = []
-        for quality in qualities:
-            msg_id = await send_video_to_user(
-                update, context, chat_id, user_name, title, quality,
-                is_callback=True, return_msg_id=True
-            )
-            if msg_id:
-                sent_msg_ids.append(msg_id)
-            await asyncio.sleep(1)
-
-        if sent_msg_ids:
-            asyncio.create_task(
-                auto_delete_with_notification(
-                    context=context, chat_id=chat_id,
-                    message_ids_to_delete=sent_msg_ids, delete_time=AUTO_DELETE_TIME
-                )
-            )
         return
 
     # ========== ADMIN: APPROVE PAYMENT ==========
@@ -1473,7 +1371,6 @@ async def provider_handle_photo(update: Update, context: ContextTypes.DEFAULT_TY
     payment_step = context.user_data.get('payment_step')
 
     if payment_step == 'screenshot':
-        # ===== CHECK QR EXPIRY =====
         qr_expiry = context.user_data.get('qr_expiry')
         if qr_expiry and datetime.now() > qr_expiry:
             context.user_data.pop('payment_step', None)
@@ -1613,29 +1510,28 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
 # ================================================================
 
 async def send_video_to_user(update, context, chat_id, user_name, title,
-                              quality_data, is_callback=False, return_msg_id=False):
+                              quality_data, is_callback=False, return_msg_id=False, skip_warning=False):
     q_id, q_label, file_url, file_size = quality_data
     size_str = format_file_size(file_size)
 
-    # ===== DETECT OLD file_id vs NEW file_url =====
     is_old_file_id = not file_url.startswith("https://t.me/c/") if file_url else False
 
-    # Warning message - 10 sec mein delete
-    try:
-        warning_msg = await context.bot.send_message(
-            chat_id=chat_id,
-            text=(
-                f"👋 Hello {user_name}!\n\n"
-                f"📊 Quality: {q_label} ({size_str})\n\n"
-                "⚠️ Video 5 min baad auto-delete hogi.\n"
-                "💾 Saved Messages mein forward kar lo!\n\n"
-                "⏳ Sending..."
+    # Warning message - sirf jab skip_warning False ho
+    if not skip_warning:
+        try:
+            warning_msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"👋 Hello {user_name}!\n\n"
+                    f"📊 Quality: {q_label} ({size_str})\n\n"
+                    "⚠️ Video 5 min baad auto-delete hogi.\n"
+                    "💾 Saved Messages mein forward kar lo!\n\n"
+                    "⏳ Sending..."
+                )
             )
-        )
-        # 10 sec mein delete - video aane se pehle hi
-        asyncio.create_task(schedule_delete(context, chat_id, warning_msg.message_id, 10))
-    except Exception as e:
-        logger.error(f"Warning msg error: {e}")
+            asyncio.create_task(schedule_delete(context, chat_id, warning_msg.message_id, 10))
+        except Exception as e:
+            logger.error(f"Warning msg error: {e}")
 
     caption_text = (
         f"🎬 {title}\n"
@@ -1648,7 +1544,6 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
     sent_msg_id = None
 
     if is_old_file_id:
-        # ===== OLD METHOD: file_id se directly send =====
         logger.info(f"📦 Old file_id detected for {q_label}, using send_video")
         try:
             fallback = await context.bot.send_video(
@@ -1669,7 +1564,6 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
             except:
                 pass
     else:
-        # ===== NEW METHOD: backup channel URL se copy =====
         backup_channel_id, backup_msg_id = parse_file_url(file_url)
 
         if not backup_channel_id or not backup_msg_id:
@@ -1704,7 +1598,7 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
             except:
                 pass
 
-    # Video file → 5 min delete with warning system
+    # Video file → 5 min delete with warning system (sirf jab return_msg_id False ho)
     if sent_msg_id and not return_msg_id:
         asyncio.create_task(
             auto_delete_with_notification(
@@ -1887,7 +1781,8 @@ async def run_bots():
         logger.info(f"📌 File URL Mode: Active")
         logger.info(f"📌 Duplicate Check: File Size based")
         logger.info(f"📌 UPI QR Code: Dynamic Generation Active")
-        logger.info(f"📌 Auto-Delete: Text=2min, Video=5min, QR=10min")
+        logger.info(f"📌 Auto-Delete: Text=2min, Video=5min, QR=10min, Warning=15s")
+        logger.info(f"📌 Quality Buttons: REMOVED - All qualities sent directly")
         logger.info("=" * 50)
 
         asyncio.create_task(periodic_cleanup(None))
