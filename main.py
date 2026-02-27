@@ -298,14 +298,11 @@ def generate_upi_qr(user_id, user_name, amount):
 def build_free_channel_caption(title, gplink, qualities_info):
     safe_title = html_escape(title)
     safe_gplink = html_escape(gplink)
-    quality_text = ""
-    if qualities_info:
-        quality_text = "\n📊 <b>Available Qualities:</b>\n"
-        for q in qualities_info:
-            quality_text += f"  • {q['label']} ({q['size']})\n"
+    
+    # Yahan se quality_text ka logic hata diya gaya hai
+    
     return (
-        f"🔞 <b>{safe_title}</b>\n"
-        f"{quality_text}\n"
+        f"🔞 <b>{safe_title}</b>\n\n"
         f"🔥 <b>Watch Full Video &amp; Download:</b>\n"
         f"👉 {safe_gplink}\n\n"
         f"𝘼𝙡𝙡 𝙫𝙞𝙙𝙚𝙤 𝙛𝙞𝙡𝙚 𝙙𝙞𝙧𝙚𝙘𝙩𝙡𝙮 - 𝟭𝟬 ₹ 𝐌𝐨𝐧𝐭𝐡𝐥𝐲 \n"
