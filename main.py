@@ -5,6 +5,7 @@ import asyncio
 import logging
 import aiohttp
 import psycopg2
+from urllib.parse import quote  # TOP mein import add karo
 from html import escape as html_escape
 from psycopg2 import pool
 from flask import Flask, redirect
@@ -262,14 +263,19 @@ def generate_upi_qr(user_id, user_name, amount):
     if not safe_name:
         safe_name = "User"
     note = f"TG-{user_id}-{safe_name}"
+
+    # URL encode all parameters
     upi_url = (
         f"upi://pay"
-        f"?pa={UPI_ID}"
-        f"&pn=VIP Subscription"
-        f"&am={amount}"
-        f"&tn={note}"
+        f"?pa={quote(UPI_ID)}"
+        f"&pn={quote('VIP Subscription')}"
+        f"&am={quote(str(amount))}"
+        f"&tn={quote(note)}"
         f"&cu=INR"
     )
+
+    logger.info(f"UPI URL generated: {upi_url}")
+
     qr = qrcode.QRCode(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_H,
