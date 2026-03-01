@@ -1754,6 +1754,7 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
 async def periodic_cleanup(context):
     while True:
         await asyncio.sleep(3600)
+        conn = None
         try:
             conn = get_db_connection()
             cur = conn.cursor()
@@ -1761,68 +1762,91 @@ async def periodic_cleanup(context):
             deleted = cur.rowcount
             conn.commit()
             cur.close()
-            db_pool.putconn(conn)
             if deleted > 0:
                 logger.info(f"Cleaned {deleted} old records")
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
+        finally:
+            if conn:
+                db_pool.putconn(conn) # Hamesha connection return hoga
 
 
 async def notify_expired_subs(provider_app_instance: Application):
     await asyncio.sleep(60)
     logger.info("Subscription expiry checker started")
     while True:
+        users_to_notify = []
+        conn = None
+        
+        # 1. Pehle sirf Database se users fetch karo aur connection close kardo
         try:
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute("""
-                SELECT user_id, end_date FROM subscribers
-                WHERE end_date < NOW() + INTERVAL '2 days'
-                AND end_date > NOW() - INTERVAL '7 days'
+                SELECT user_id, end_date FROM subscribers 
+                WHERE end_date < NOW() + INTERVAL '2 days' 
+                AND end_date > NOW() - INTERVAL '7 days' 
                 AND notified = FALSE
             """)
-            users = cur.fetchall()
-
-            for (user_id, end_date) in users:
-                is_expired = end_date < datetime.now()
-                if is_expired:
-                    msg_text = (
-                        "⚠️ <b>Subscription Expired!</b>\n\n"
-                        f"📅 Expired on: {end_date.strftime('%d-%m-%Y')}\n\n"
-                        "🔁 Renew: /start → Buy Subscription\n"
-                        f"❓ Help: @{ADMIN_USERNAME}"
-                    )
-                else:
-                    remaining = (end_date - datetime.now()).days
-                    msg_text = (
-                        "⚠️ <b>Subscription Expiry Alert!</b>\n\n"
-                        f"📅 Expires in <b>{remaining} days</b> ({end_date.strftime('%d-%m-%Y')})\n\n"
-                        "🔁 Renew now: /start → Buy Subscription\n"
-                        f"❓ Help: @{ADMIN_USERNAME}"
-                    )
-                try:
-                    await provider_app_instance.bot.send_message(
-                        chat_id=user_id, text=msg_text, parse_mode='HTML'
-                    )
-                except Exception as e:
-                    logger.error(f"Notify user {user_id} error: {e}")
-                try:
-                    status_text = "EXPIRED" if is_expired else f"Expires in {remaining}d"
-                    await provider_app_instance.bot.send_message(
-                        chat_id=ADMIN_USER_ID,
-                        text=f"🔔 Sub Alert: User <code>{user_id}</code> - {status_text}",
-                        parse_mode='HTML'
-                    )
-                except:
-                    pass
-                cur.execute("UPDATE subscribers SET notified = TRUE WHERE user_id = %s", (user_id,))
-                conn.commit()
-                await asyncio.sleep(2)
-
+            users_to_notify = cur.fetchall()
             cur.close()
-            db_pool.putconn(conn)
         except Exception as e:
-            logger.error(f"Expiry check error: {e}")
+            logger.error(f"Expiry check DB error: {e}")
+        finally:
+            if conn:
+                db_pool.putconn(conn)
+
+        # 2. Ab bina DB block kiye aaram se messages bhejo
+        for (user_id, end_date) in users_to_notify:
+            is_expired = end_date < datetime.now()
+            if is_expired:
+                msg_text = (
+                    "⚠️ <b>Subscription Expired!</b>\n\n"
+                    f"📅 Expired on: {end_date.strftime('%d-%m-%Y')}\n\n"
+                    "🔁 Renew: /start → Buy Subscription\n"
+                    f"❓ Help: @{ADMIN_USERNAME}"
+                )
+            else:
+                remaining = (end_date - datetime.now()).days
+                msg_text = (
+                    "⚠️ <b>Subscription Expiry Alert!</b>\n\n"
+                    f"📅 Expires in <b>{remaining} days</b> ({end_date.strftime('%d-%m-%Y')})\n\n"
+                    "🔁 Renew now: /start → Buy Subscription\n"
+                    f"❓ Help: @{ADMIN_USERNAME}"
+                )
+                
+            try:
+                await provider_app_instance.bot.send_message(
+                    chat_id=user_id, text=msg_text, parse_mode='HTML'
+                )
+            except Exception as e:
+                logger.error(f"Notify user {user_id} error: {e}")
+                
+            try:
+                status_text = "EXPIRED" if is_expired else f"Expires in {remaining}d"
+                await provider_app_instance.bot.send_message(
+                    chat_id=ADMIN_USER_ID,
+                    text=f"🔔 Sub Alert: User <code>{user_id}</code> - {status_text}",
+                    parse_mode='HTML'
+                )
+            except:
+                pass
+
+            # 3. Status update karne ke liye ek quick connection lo aur band kardo
+            conn2 = None
+            try:
+                conn2 = get_db_connection()
+                cur2 = conn2.cursor()
+                cur2.execute("UPDATE subscribers SET notified = TRUE WHERE user_id = %s", (user_id,))
+                conn2.commit()
+                cur2.close()
+            except Exception as e:
+                logger.error(f"Update notified status error: {e}")
+            finally:
+                if conn2:
+                    db_pool.putconn(conn2)
+
+            await asyncio.sleep(2)
 
         await asyncio.sleep(43200)
 
