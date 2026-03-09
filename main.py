@@ -1792,34 +1792,89 @@ async def run_bots():
         await provider_app.shutdown()
 
 # ================================================================
+#                    STARTUP WITH BETTER ERROR HANDLING
+# ================================================================
+
 if __name__ == '__main__':
+    print("=" * 60)
+    print("🚀 STARTING APPLICATION...")
+    print("=" * 60)
+    
+    # ===== ENV VARS CHECK =====
     required = ['MAIN_BOT_TOKEN', 'PROVIDER_BOT_TOKEN', 'DATABASE_URL']
     missing = [v for v in required if not os.environ.get(v)]
     if missing:
-        logger.error(f"Missing env vars: {missing}")
+        logger.error(f"❌ Missing environment variables: {', '.join(missing)}")
+        print(f"❌ ERROR: Missing env vars: {', '.join(missing)}")
+        print("Set these in Render dashboard → Environment")
         exit(1)
 
+    # ===== BACKUP CHANNEL CHECK =====
     if BACKUP_1 == 0:
-        logger.error("BACKUP_CHANNEL_1 is REQUIRED!")
-        logger.error("Set BACKUP_CHANNEL_1 env variable (e.g. -1002683355160)")
-        logger.error("Both bots must be admin of this channel!")
+        logger.error("❌ BACKUP_CHANNEL_1 is REQUIRED!")
+        print("❌ ERROR: BACKUP_CHANNEL_1 not set!")
+        print("Set BACKUP_CHANNEL_1 env variable (e.g. -1002683355160)")
+        print("Both bots must be admin of this channel!")
         exit(1)
 
+    # ===== DATABASE INIT =====
+    print("\n📊 Initializing database pool...")
     try:
         init_db_pool()
-        setup_db()
+        print("✅ Database pool created")
     except Exception as e:
-        logger.error(f"DB init failed: {e}")
+        logger.error(f"❌ Database pool init failed: {e}")
+        print(f"❌ DATABASE ERROR: {e}")
+        print("Check your DATABASE_URL format")
         exit(1)
 
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    logger.info("Flask started")
+    print("\n📋 Setting up database tables...")
+    try:
+        setup_db()
+        print("✅ Database tables ready")
+    except Exception as e:
+        logger.error(f"❌ Database setup failed: {e}")
+        print(f"❌ TABLE SETUP ERROR: {e}")
+        exit(1)
 
+    # ===== FLASK WEB SERVER =====
+    print("\n🌐 Starting Flask web server...")
+    try:
+        flask_thread = Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        print("✅ Flask started on port", os.environ.get('PORT', 8080))
+    except Exception as e:
+        logger.error(f"❌ Flask start failed: {e}")
+        print(f"❌ FLASK ERROR: {e}")
+        exit(1)
+
+    # ===== PRINT CONFIG =====
+    print("\n" + "=" * 60)
+    print("⚙️  CONFIGURATION:")
+    print("=" * 60)
+    print(f"Admin User ID: {ADMIN_USER_ID}")
+    print(f"Admin Username: @{ADMIN_USERNAME}")
+    print(f"Provider Bot: @{PROVIDER_BOT_USERNAME}")
+    print(f"Backup Channel: {BACKUP_1}")
+    print(f"Free Channel: {FREE_CH if FREE_CH != 0 else 'Not Set'}")
+    print(f"Paid Channel: {PAID_CH if PAID_CH != 0 else 'Not Set'}")
+    print(f"Video Delete Time: {AUTO_DELETE_TIME}s")
+    print(f"Text Delete Time: {TEXT_DELETE_TIME}s")
+    print(f"QR Delete Time: {QR_DELETE_TIME}s")
+    print(f"QR Code Available: {'Yes' if QR_AVAILABLE else 'No (text fallback)'}")
+    print(f"Subscription Amount: ₹{SUBSCRIPTION_AMOUNT}")
+    print("=" * 60)
+
+    # ===== START BOTS =====
+    print("\n🤖 Starting Telegram bots...")
     try:
         asyncio.run(run_bots())
     except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        print("\n🛑 Shutting down gracefully...")
+        logger.info("Shutdown by user")
     except Exception as e:
-        logger.error(f"Fatal: {e}")
+        logger.error(f"❌ FATAL ERROR: {e}", exc_info=True)
+        print(f"\n❌ FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
