@@ -452,6 +452,8 @@ async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return WAIT_TRIM
 
+# ================= MAIN BOT - FIXED TRIM HANDLING =================
+
 async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
@@ -497,6 +499,7 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAIT_FULL
 
+    # ===== TRIM VIDEO - YAHAN FIX HAI =====
     if msg.video or msg.document or msg.animation:
         raw_caption = msg.caption if msg.caption else ""
         cleaned_title = clean_title(raw_caption)
@@ -509,12 +512,19 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             context.user_data['trim_type'] = 'document'
 
+        # TRIM VIDEO KO SEPARATE STORE KARO - FULL_VIDEOS MEIN NAHI!
         context.user_data['trim_chat_id'] = msg.chat_id
         context.user_data['trim_msg_id'] = msg.message_id
+        
+        # ⚠️ YEH LINE NAHI CHAHIYE - TRIM VIDEO FULL LIST MEIN NAHI JAANA CHAHIYE
+        # context.user_data['full_videos'] list mein ADD NAHI KARO!
+        
         await msg.reply_text(
             f"✅ <b>Trim Video Saved!</b>\n\n"
             f"📝 Title: {html_escape(cleaned_title)}\n\n"
             "🔞 Ab <b>FULL VIDEO(s)</b> bhejo, phir <code>/done</code>\n\n"
+            "⚠️ <b>Note:</b> Trim video sirf preview ke liye hai.\n"
+            "📹 Ab actual FULL quality videos bhejo!\n\n"
             "❌ Cancel: /cancel",
             parse_mode='HTML'
         )
@@ -526,98 +536,19 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return WAIT_TRIM
 
-async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg:
-        return WAIT_FULL
-
-    if msg.text and msg.text.strip().lower() == '/done':
-        full_videos = context.user_data.get('full_videos', [])
-        if not full_videos:
-            await msg.reply_text("❌ Koi video nahi! Pehle video bhejo, phir /done.")
-            return WAIT_FULL
-        return await finalize_single_post(update, context)
-
-    if msg.text and msg.text.strip().lower() == '/cancel':
-        context.user_data.clear()
-        await msg.reply_text("❌ Upload cancelled.")
-        return ConversationHandler.END
-
-    if msg.text and msg.text.strip().lower() == '/start':
-        context.user_data.clear()
-        await msg.reply_text("🔄 Reset! Use /post to start again.")
-        return ConversationHandler.END
-
-    if not msg.video and not msg.document:
-        await msg.reply_text("❌ Video file bhejo! Ya /done / /cancel likho.")
-        return WAIT_FULL
-
-    raw_caption = msg.caption if msg.caption else ""
-    title = context.user_data.get('title', '')
-    if not title or title == "Exclusive Premium Content":
-        title = clean_title(raw_caption)
-        context.user_data['title'] = title
-
-    video_obj = msg.video
-    doc_obj = msg.document
-    duration = 0
-    quality_label, width, height, file_size = detect_quality_label(
-        video_obj=video_obj, document_obj=doc_obj, caption=raw_caption
-    )
-    if video_obj:
-        duration = video_obj.duration or 0
-
-    full_videos = context.user_data.get('full_videos', [])
-    for existing in full_videos:
-        if existing['file_size'] == file_size and file_size > 0:
-            existing_size_str = format_file_size(existing['file_size'])
-            await msg.reply_text(
-                f"⚠️ <b>Duplicate detected!</b>\n\n"
-                f"📦 File size <b>{format_file_size(file_size)}</b> already exists "
-                f"as <b>{existing['quality_label']}</b> ({existing_size_str})\n\n"
-                f"📹 Same size = same file. Different quality bhejo ya /done",
-                parse_mode='HTML'
-            )
-            return WAIT_FULL
-
-    video_data = {
-        'quality_label': quality_label,
-        'width': width,
-        'height': height,
-        'file_size': file_size,
-        'duration': duration,
-        'chat_id': msg.chat_id,
-        'msg_id': msg.message_id
-    }
-    full_videos.append(video_data)
-    context.user_data['full_videos'] = full_videos
-
-    count = len(full_videos)
-    size_str = format_file_size(file_size)
-    quality_list = "\n".join(
-        [f"  {i + 1}. {v['quality_label']} ({format_file_size(v['file_size'])})"
-         for i, v in enumerate(full_videos)]
-    )
-
-    await msg.reply_text(
-        f"✅ <b>Video #{count} Added!</b>\n\n"
-        f"📊 Quality: <b>{quality_label}</b>\n"
-        f"💾 Size: {size_str}\n"
-        f"⏱️ Duration: {duration}s\n\n"
-        f"📋 <b>All Qualities:</b>\n{quality_list}\n\n"
-        f"📹 Aur bhejo ya <code>/done</code> likho\n❌ Cancel: /cancel",
-        parse_mode='HTML'
-    )
-    return WAIT_FULL
 
 async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     full_videos = context.user_data.get('full_videos', [])
     title = context.user_data.get('title', 'Exclusive Premium Content')
     trim_type = context.user_data.get('trim_type', 'skip')
+    trim_chat_id = context.user_data.get('trim_chat_id')
+    trim_msg_id = context.user_data.get('trim_msg_id')
+    
     total = len(full_videos)
     status = await msg.reply_text(f"⏳ Processing {total} quality(ies)...")
 
+    # Create video entry in DB
     conn = None
     vid_id = None
     try:
@@ -638,6 +569,7 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     qualities_info = []
     failed_qualities = []
 
+    # ===== FULL VIDEOS UPLOAD KARO =====
     for idx, vdata in enumerate(full_videos):
         q_label = vdata['quality_label']
         src_chat_id = vdata['chat_id']
@@ -654,6 +586,7 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
             file_url = construct_file_url(BACKUP_1, copied_msg.message_id)
         except Exception as e:
             failed_qualities.append(q_label)
+            logger.error(f"Backup failed for {q_label}: {e}")
             continue
 
         for ch_id in [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]:
@@ -676,8 +609,8 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             conn2.commit()
             cur2.close()
-        except: 
-            pass
+        except Exception as e:
+            logger.error(f"DB save error for {q_label}: {e}")
         finally:
             if conn2: 
                 db_pool.putconn(conn2)
@@ -685,10 +618,11 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         qualities_info.append({'label': q_label, 'size': format_file_size(vdata['file_size']), 'url': file_url})
 
     if not qualities_info:
-        await status.edit_text("❌ All Failed!")
+        await status.edit_text("❌ All uploads failed!")
         context.user_data.clear()
         return ConversationHandler.END
 
+    # ===== FREE CHANNEL POST =====
     bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
     bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
     
@@ -700,28 +634,59 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     caption = build_free_channel_caption(title, qualities_info)
 
     if FREE_CH != 0:
-        first_vid = full_videos[0]
-        try:
-            await context.bot.copy_message(
-                chat_id=FREE_CH, from_chat_id=first_vid['chat_id'],
-                message_id=first_vid['msg_id'], caption=caption, parse_mode='HTML', 
-                reply_markup=post_keyboard
-            )
-        except:
+        # ===== YAHAN TRIM VIDEO USE KARO (agar available ho) =====
+        if trim_type != 'skip' and trim_chat_id and trim_msg_id:
+            # Trim video/photo use karo for preview in free channel
             try:
-                await context.bot.send_message(
-                    chat_id=FREE_CH, text=caption, parse_mode='HTML', 
+                await context.bot.copy_message(
+                    chat_id=FREE_CH, 
+                    from_chat_id=trim_chat_id,
+                    message_id=trim_msg_id, 
+                    caption=caption, 
+                    parse_mode='HTML', 
                     reply_markup=post_keyboard
                 )
-            except Exception as e2:
-                logger.error(f"Free channel failed: {e2}")
+                logger.info(f"Free channel: Posted trim video for {title}")
+            except Exception as e:
+                logger.error(f"Trim video post failed: {e}")
+                # Fallback: Use first full video
+                try:
+                    first_vid = full_videos[0]
+                    await context.bot.copy_message(
+                        chat_id=FREE_CH, 
+                        from_chat_id=first_vid['chat_id'],
+                        message_id=first_vid['msg_id'], 
+                        caption=caption, 
+                        parse_mode='HTML', 
+                        reply_markup=post_keyboard
+                    )
+                except Exception as e2:
+                    logger.error(f"Fallback full video post failed: {e2}")
+        else:
+            # No trim - use first full video
+            try:
+                first_vid = full_videos[0]
+                await context.bot.copy_message(
+                    chat_id=FREE_CH, 
+                    from_chat_id=first_vid['chat_id'],
+                    message_id=first_vid['msg_id'], 
+                    caption=caption, 
+                    parse_mode='HTML', 
+                    reply_markup=post_keyboard
+                )
+            except Exception as e:
+                logger.error(f"Free channel post failed: {e}")
 
+    # ===== SUCCESS MESSAGE =====
     q_str = ", ".join([f"{q['label']}({q['size']})" for q in qualities_info])
+    fail_str = f"\n⚠️ Failed: {', '.join(failed_qualities)}" if failed_qualities else ""
+    
     await status.edit_text(
         f"✅ <b>SUCCESS!</b>\n\n"
         f"📝 {generate_display_title(title)}\n"
-        f"📊 {q_str}\n"
-        f"🔗 {bot_link}",
+        f"📊 Qualities: {q_str}{fail_str}\n"
+        f"🔗 Link: {bot_link}\n\n"
+        f"{'📹 Trim video posted in free channel' if trim_type != 'skip' else '📹 First quality posted in free channel'}",
         parse_mode='HTML'
     )
     context.user_data.clear()
