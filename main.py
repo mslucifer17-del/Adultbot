@@ -5,7 +5,7 @@ import asyncio
 import logging
 import aiohttp
 import psycopg2
-from urllib.parse import quote  # TOP mein import add karo
+from urllib.parse import quote
 from html import escape as html_escape
 from psycopg2 import pool
 from flask import Flask, redirect
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # ================= VARIABLES =================
 MAIN_BOT_TOKEN = os.environ.get("MAIN_BOT_TOKEN")
 PROVIDER_BOT_TOKEN = os.environ.get("PROVIDER_BOT_TOKEN")
-PROVIDER_BOT_USERNAME = os.environ.get("PROVIDER_BOT_USERNAME")
+PROVIDER_BOT_USERNAME = os.environ.get("PROVIDER_BOT_USERNAME", "").replace("@", "")
 GPLINKS_API_KEY = os.environ.get("GPLINKS_API_KEY")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 WEB_DOMAIN = os.environ.get("WEB_DOMAIN", "https://my-bot.onrender.com").strip()
@@ -58,7 +58,6 @@ BULK_WAIT_VIDEO, BULK_CONFIRM = range(2)
 # ================= DATABASE SETUP =================
 db_pool = None
 
-
 def init_db_pool():
     global db_pool
     try:
@@ -67,7 +66,6 @@ def init_db_pool():
     except Exception as e:
         logger.error(f"Database pool creation failed: {e}")
         raise
-
 
 def setup_db():
     conn = None
@@ -136,12 +134,10 @@ def setup_db():
         if conn:
             db_pool.putconn(conn)
 
-
 def get_db_connection():
     if db_pool is None:
         raise Exception("Database pool not initialized")
     return db_pool.getconn()
-
 
 # ================= HELPER FUNCTIONS =================
 
@@ -153,7 +149,6 @@ def construct_file_url(channel_id, message_id):
         channel_str = channel_str[1:]
     return f"https://t.me/c/{channel_str}/{message_id}"
 
-
 def parse_file_url(file_url):
     if not file_url:
         return None, None
@@ -164,7 +159,6 @@ def parse_file_url(file_url):
         channel_id = int(f"-100{channel_part}")
         return channel_id, msg_id
     return None, None
-
 
 def clean_title(raw_title):
     if not raw_title:
@@ -187,12 +181,10 @@ def clean_title(raw_title):
         return "Exclusive Premium Content"
     return title
 
-
 def generate_display_title(cleaned_title):
     if len(cleaned_title) > 50:
         return cleaned_title[:47] + "..."
     return cleaned_title
-
 
 def detect_quality_label(video_obj=None, document_obj=None, caption=""):
     width = 0
@@ -244,7 +236,6 @@ def detect_quality_label(video_obj=None, document_obj=None, caption=""):
 
     return 'Unknown', width, height, file_size
 
-
 def format_file_size(size_bytes):
     if size_bytes <= 0:
         return "Unknown"
@@ -257,14 +248,12 @@ def format_file_size(size_bytes):
     else:
         return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
 
-
 def generate_upi_qr(user_id, user_name, amount):
     safe_name = re.sub(r'[^a-zA-Z0-9 ]', '', user_name)[:30].strip()
     if not safe_name:
         safe_name = "User"
     note = f"TG-{user_id}-{safe_name}"
 
-    # URL encode all parameters
     upi_url = (
         f"upi://pay"
         f"?pa={quote(UPI_ID)}"
@@ -291,7 +280,6 @@ def generate_upi_qr(user_id, user_name, amount):
     bio.name = f"qr_{user_id}.png"
     return bio, note
 
-
 def build_free_channel_caption(title, qualities_info):
     safe_title = html_escape(title)
     quality_text = " | ".join([q['label'] for q in qualities_info]) if qualities_info else "HD Quality"
@@ -299,32 +287,15 @@ def build_free_channel_caption(title, qualities_info):
     return (
         f"🎬 <b>{safe_title}</b>\n\n"
         f"🔞 <b>18+ Exclusive Premium Content</b>\n\n"
+        f"📊 <b>Available Qualities:</b> {quality_text}\n\n"
         f"👇 <b>Watch Full Video & Download Below</b> 👇\n"
     )
-
 
 def build_backup_caption(title, quality_label=""):
     safe_title = html_escape(title)
     if quality_label:
         return f"🔒 {safe_title} [{quality_label}]"
     return f"🔒 {safe_title}"
-
-
-async def shorten_link(long_url):
-    if not GPLINKS_API_KEY:
-        logger.warning("GPLINKS_API_KEY not set, returning original URL")
-        return long_url
-    api_url = f"https://gplinks.in/api?api={GPLINKS_API_KEY}&url={long_url}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, timeout=10) as resp:
-                data = await resp.json()
-                if data.get("status") == "success":
-                    return data.get("shortenedUrl", long_url)
-    except Exception as e:
-        logger.error(f"GPLink Error: {e}")
-    return long_url
-
 
 async def schedule_delete(context, chat_id, message_id, delay=120):
     try:
@@ -333,7 +304,6 @@ async def schedule_delete(context, chat_id, message_id, delay=120):
         logger.info(f"Text msg {message_id} deleted from {chat_id}")
     except Exception as e:
         logger.error(f"Text delete error {message_id}: {e}")
-
 
 async def auto_delete_with_notification(context, chat_id, message_ids_to_delete, delete_time=AUTO_DELETE_TIME):
     try:
@@ -385,7 +355,6 @@ async def auto_delete_with_notification(context, chat_id, message_ids_to_delete,
     except Exception as e:
         logger.error(f"Auto-delete error: {e}")
 
-
 def check_active_subscription(user_id):
     conn = None
     try:
@@ -408,26 +377,21 @@ def check_active_subscription(user_id):
         if conn:
             db_pool.putconn(conn)
 
-
 # ================= WEB REDIRECTOR =================
 app = Flask(__name__)
-
 
 @app.route('/')
 def home():
     return "Server is Running!"
 
-
 @app.route('/watch/<int:vid_id>')
 def watch_video(vid_id):
-    bot_username = (PROVIDER_BOT_USERNAME or "your_bot").strip()
+    bot_username = PROVIDER_BOT_USERNAME or "your_bot"
     return redirect(f"https://t.me/{bot_username}?start=vid_{vid_id}")
-
 
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
-
 
 # ================================================================
 #                    MAIN BOT (ADMIN ONLY)
@@ -460,7 +424,6 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-
 async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ Access Denied!")
@@ -488,7 +451,6 @@ async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML'
     )
     return WAIT_TRIM
-
 
 async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -563,7 +525,6 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  📹 Trim Video / 🖼️ Photo / ⏭️ /skip / ❌ /cancel"
     )
     return WAIT_TRIM
-
 
 async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -649,7 +610,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     return WAIT_FULL
 
-
 async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     full_videos = context.user_data.get('full_videos', [])
@@ -658,7 +618,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     total = len(full_videos)
     status = await msg.reply_text(f"⏳ Processing {total} quality(ies)...")
 
-    # Create video entry in DB
     conn = None
     vid_id = None
     try:
@@ -673,7 +632,8 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.clear()
         return ConversationHandler.END
     finally:
-        if conn: db_pool.putconn(conn)
+        if conn: 
+            db_pool.putconn(conn)
 
     qualities_info = []
     failed_qualities = []
@@ -702,7 +662,8 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
                     chat_id=ch_id, from_chat_id=src_chat_id,
                     message_id=src_msg_id, caption=backup_caption, parse_mode='HTML'
                 )
-            except: pass
+            except: 
+                pass
 
         conn2 = None
         try:
@@ -715,9 +676,11 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             conn2.commit()
             cur2.close()
-        except: pass
+        except: 
+            pass
         finally:
-            if conn2: db_pool.putconn(conn2)
+            if conn2: 
+                db_pool.putconn(conn2)
 
         qualities_info.append({'label': q_label, 'size': format_file_size(vdata['file_size']), 'url': file_url})
 
@@ -726,8 +689,7 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.clear()
         return ConversationHandler.END
 
-    # ===== NEW DIRECT LINK & BUTTONS =====
-    bot_username = PROVIDER_BOT_USERNAME.replace("@", "") if PROVIDER_BOT_USERNAME else "your_bot"
+    bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
     bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
     
     post_keyboard = InlineKeyboardMarkup([
@@ -742,19 +704,119 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             await context.bot.copy_message(
                 chat_id=FREE_CH, from_chat_id=first_vid['chat_id'],
-                message_id=first_vid['msg_id'], caption=caption, parse_mode='HTML', reply_markup=post_keyboard
+                message_id=first_vid['msg_id'], caption=caption, parse_mode='HTML', 
+                reply_markup=post_keyboard
             )
         except:
             try:
-                await context.bot.send_message(chat_id=FREE_CH, text=caption, parse_mode='HTML', reply_markup=post_keyboard)
+                await context.bot.send_message(
+                    chat_id=FREE_CH, text=caption, parse_mode='HTML', 
+                    reply_markup=post_keyboard
+                )
             except Exception as e2:
                 logger.error(f"Free channel failed: {e2}")
 
     q_str = ", ".join([f"{q['label']}({q['size']})" for q in qualities_info])
-    await status.edit_text(f"✅ <b>ALL DONE!</b>\n🎬 {title} posted directly.\n🔗 Link: {bot_link}", parse_mode='HTML')
+    await status.edit_text(
+        f"✅ <b>SUCCESS!</b>\n\n"
+        f"📝 {generate_display_title(title)}\n"
+        f"📊 {q_str}\n"
+        f"🔗 {bot_link}",
+        parse_mode='HTML'
+    )
     context.user_data.clear()
     return ConversationHandler.END
 
+# ========== BULK UPLOAD ==========
+
+async def start_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ Access Denied!")
+        return ConversationHandler.END
+
+    if BACKUP_1 == 0:
+        await update.message.reply_text("❌ BACKUP_CHANNEL_1 not set!")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    context.user_data['bulk_videos'] = {}
+    await update.message.reply_text(
+        "📦 <b>BULK UPLOAD MODE</b>\n\n"
+        "📹 Videos bhejte jao.\n"
+        "📝 Caption = Title (auto-cleaned)\n"
+        "📊 Same title = multiple qualities\n\n"
+        "✅ Sab bhejo, phir <code>/done</code>\n"
+        "❌ Cancel: /cancel",
+        parse_mode='HTML'
+    )
+    return BULK_WAIT_VIDEO
+
+async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg:
+        return BULK_WAIT_VIDEO
+
+    if msg.text and msg.text.strip().lower() == '/done':
+        return await finalize_bulk_upload(update, context)
+
+    if msg.text and msg.text.strip().lower() == '/cancel':
+        context.user_data.clear()
+        await msg.reply_text("❌ Bulk cancelled.")
+        return ConversationHandler.END
+
+    if msg.text and msg.text.strip().lower() == '/start':
+        context.user_data.clear()
+        await msg.reply_text("🔄 Reset!")
+        return ConversationHandler.END
+
+    if not msg.video and not msg.document:
+        await msg.reply_text("❌ Video/Document bhejo! Ya /done")
+        return BULK_WAIT_VIDEO
+
+    raw_caption = msg.caption if msg.caption else ""
+    title = clean_title(raw_caption)
+    video_obj = msg.video
+    doc_obj = msg.document
+    duration = 0
+    quality_label, width, height, file_size = detect_quality_label(
+        video_obj=video_obj, document_obj=doc_obj, caption=raw_caption
+    )
+    if video_obj:
+        duration = video_obj.duration or 0
+
+    bulk_videos = context.user_data.get('bulk_videos', {})
+    if title not in bulk_videos:
+        bulk_videos[title] = []
+
+    for existing in bulk_videos[title]:
+        if existing['file_size'] == file_size and file_size > 0:
+            await msg.reply_text(
+                f"⚠️ Duplicate in '<b>{generate_display_title(title)}</b>': {quality_label} = {format_file_size(file_size)}",
+                parse_mode='HTML'
+            )
+            return BULK_WAIT_VIDEO
+
+    video_data = {
+        'quality_label': quality_label,
+        'width': width,
+        'height': height,
+        'file_size': file_size,
+        'duration': duration,
+        'chat_id': msg.chat_id,
+        'msg_id': msg.message_id
+    }
+    bulk_videos[title].append(video_data)
+    context.user_data['bulk_videos'] = bulk_videos
+
+    total_titles = len(bulk_videos)
+    total_files = sum(len(v) for v in bulk_videos.values())
+    await msg.reply_text(
+        f"✅ Added: <b>{generate_display_title(title)}</b> [{quality_label} - {format_file_size(file_size)}]\n\n"
+        f"📊 Total: {total_titles} titles, {total_files} files\n\n"
+        f"📹 Aur bhejo ya <code>/done</code>",
+        parse_mode='HTML'
+    )
+    return BULK_WAIT_VIDEO
 
 async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -852,8 +914,7 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             results.append(f"❌ {generate_display_title(title)}: All backups failed!")
             continue
 
-        # ===== NEW DIRECT LINK & BUTTONS =====
-        bot_username = PROVIDER_BOT_USERNAME.replace("@", "") if PROVIDER_BOT_USERNAME else "your_bot"
+        bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
         bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
         
         post_keyboard = InlineKeyboardMarkup([
@@ -868,12 +929,14 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 await context.bot.copy_message(
                     chat_id=FREE_CH, from_chat_id=first_vid['chat_id'],
-                    message_id=first_vid['msg_id'], caption=caption, parse_mode='HTML', reply_markup=post_keyboard
+                    message_id=first_vid['msg_id'], caption=caption, parse_mode='HTML',
+                    reply_markup=post_keyboard
                 )
             except:
                 try:
                     await context.bot.send_message(
-                        chat_id=FREE_CH, text=caption, parse_mode='HTML', reply_markup=post_keyboard
+                        chat_id=FREE_CH, text=caption, parse_mode='HTML',
+                        reply_markup=post_keyboard
                     )
                 except Exception as e2:
                     logger.error(f"Free channel failed: {e2}")
@@ -892,12 +955,10 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data.clear()
     return ConversationHandler.END
 
-
 async def cancel_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("❌ Cancelled.")
     return ConversationHandler.END
-
 
 # ================================================================
 #            PROVIDER BOT (USER-FACING)
@@ -957,7 +1018,6 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, TEXT_DELETE_TIME))
                 return
 
-            # Delete user's /start message
             asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, 5))
 
             if len(qualities) == 1:
@@ -1016,7 +1076,6 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif end_date:
         sub_status = "\n\n⚠️ <b>Subscription Expired!</b> Renew karo neeche se 👇"
 
-    # YAHAN INLINE KI JAGAH REPLY KEYBOARD USE HOGA
     keyboard = [
         [KeyboardButton("💎 Buy VIP")],
         [KeyboardButton("🆓 Free Channel"), KeyboardButton("👨‍💻 Contact Admin")]
@@ -1038,7 +1097,6 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(schedule_delete(context, chat_id, welcome.message_id, TEXT_DELETE_TIME))
     asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, TEXT_DELETE_TIME))
 
-
 async def provider_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('payment_step', None)
     context.user_data.pop('screenshot_id', None)
@@ -1051,7 +1109,6 @@ async def provider_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     asyncio.create_task(schedule_delete(context, chat_id, cancel_msg.message_id, TEXT_DELETE_TIME))
     asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, TEXT_DELETE_TIME))
-
 
 async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1260,7 +1317,6 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
             pass
         return
 
-
 async def provider_handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     chat_id = msg.chat_id
@@ -1304,7 +1360,6 @@ async def provider_handle_photo(update: Update, context: ContextTypes.DEFAULT_TY
     asyncio.create_task(schedule_delete(context, chat_id, err.message_id, TEXT_DELETE_TIME))
     asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
 
-
 async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     chat_id = msg.chat_id
@@ -1313,9 +1368,7 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     user_name = user.first_name
 
-    # ==========================================
-    # MENU BUTTONS LOGIC (Naye Reply Keyboard ke liye)
-    # ==========================================
+    # ========== MENU BUTTONS ==========
     if text == "💎 Buy VIP":
         is_active, end_date = check_active_subscription(user.id)
         if is_active and end_date:
@@ -1368,7 +1421,8 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"QR generation failed: {e}")
             safe_name = re.sub(r'[^a-zA-Z0-9 ]', '', user_name)[:30].strip()
-            if not safe_name: safe_name = "User"
+            if not safe_name: 
+                safe_name = "User"
             note = f"TG-{user.id}-{safe_name}"
             context.user_data['payment_note'] = note
 
@@ -1402,9 +1456,7 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
         return
 
-    # ==========================================
-    # UTR / PAYMENT LOGIC (Purana wala safe hai)
-    # ==========================================
+    # ========== UTR NUMBER ==========
     if payment_step == 'utr':
         utr_number = msg.text.strip()
         if len(utr_number) < 4:
@@ -1484,7 +1536,6 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
         return
 
-    # Agar inme se kuch bhi na ho (yani user ne random text likha ho)
     normal_err = await msg.reply_text(
         "🤔 Samajh nahi aaya.\n\n"
         "👉 Niche diye gaye menu buttons ka istemal karein.\n"
@@ -1492,7 +1543,6 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     asyncio.create_task(schedule_delete(context, chat_id, normal_err.message_id, TEXT_DELETE_TIME))
     asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
-
 
 # ================================================================
 #  SEND VIDEO TO USER
@@ -1509,13 +1559,13 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
         warning_msg = await context.bot.send_message(
             chat_id=chat_id,
             text=(f"👋 <b>Hello {html_escape(user_name)}!</b>\n\n"
-                  f"⏳ Tumhari file (<b>{q_label}</b>) bheji ja rahi..."),
+                  f"⏳ Tumhari file (<b>{q_label}</b>) bheji ja rahi hai..."),
             parse_mode='HTML'
         )
         asyncio.create_task(schedule_delete(context, chat_id, warning_msg.message_id, 10))
-    except: pass
+    except: 
+        pass
 
-    # ===== NEW PREMIUM CAPTION & BUTTONS =====
     caption_text = (
         f"🎬 <b>{html_escape(title)}</b>\n\n"
         f"📊 <b>Quality:</b> {q_label} ({size_str})\n"
@@ -1541,7 +1591,8 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
                 parse_mode='HTML', reply_markup=join_keyboard, supports_streaming=True
             )
             sent_msg_id = fallback.message_id
-        except: pass
+        except: 
+            pass
     else:
         backup_channel_id, backup_msg_id = parse_file_url(file_url)
         if backup_channel_id and backup_msg_id:
@@ -1551,7 +1602,8 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
                     caption=caption_text, parse_mode='HTML', reply_markup=join_keyboard
                 )
                 sent_msg_id = copied.message_id
-            except: pass
+            except: 
+                pass
 
     if sent_msg_id and not return_msg_id:
         asyncio.create_task(
@@ -1563,8 +1615,8 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
 
     return sent_msg_id
 
-
 # ================= BACKGROUND TASKS =================
+
 async def periodic_cleanup(context):
     while True:
         await asyncio.sleep(3600)
@@ -1582,8 +1634,7 @@ async def periodic_cleanup(context):
             logger.error(f"Cleanup error: {e}")
         finally:
             if conn:
-                db_pool.putconn(conn) # Hamesha connection return hoga
-
+                db_pool.putconn(conn)
 
 async def notify_expired_subs(provider_app_instance: Application):
     await asyncio.sleep(60)
@@ -1592,7 +1643,6 @@ async def notify_expired_subs(provider_app_instance: Application):
         users_to_notify = []
         conn = None
         
-        # 1. Pehle sirf Database se users fetch karo aur connection close kardo
         try:
             conn = get_db_connection()
             cur = conn.cursor()
@@ -1610,7 +1660,6 @@ async def notify_expired_subs(provider_app_instance: Application):
             if conn:
                 db_pool.putconn(conn)
 
-        # 2. Ab bina DB block kiye aaram se messages bhejo
         for (user_id, end_date) in users_to_notify:
             is_expired = end_date < datetime.now()
             if is_expired:
@@ -1646,7 +1695,6 @@ async def notify_expired_subs(provider_app_instance: Application):
             except:
                 pass
 
-            # 3. Status update karne ke liye ek quick connection lo aur band kardo
             conn2 = None
             try:
                 conn2 = get_db_connection()
@@ -1663,7 +1711,6 @@ async def notify_expired_subs(provider_app_instance: Application):
             await asyncio.sleep(2)
 
         await asyncio.sleep(43200)
-
 
 # ================================================================
 #                    RUN BOTH BOTS
@@ -1778,7 +1825,6 @@ async def run_bots():
         await provider_app.updater.stop()
         await provider_app.stop()
         await provider_app.shutdown()
-
 
 # ================================================================
 if __name__ == '__main__':
