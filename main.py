@@ -1,6 +1,6 @@
 import os
 import re
-import json
+import sys
 import asyncio
 import logging
 import aiohttp
@@ -18,11 +18,16 @@ from telegram.ext import (
     CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 )
 
+# Force unbuffered output for better logging
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
 try:
     import qrcode
     QR_AVAILABLE = True
 except ImportError:
     QR_AVAILABLE = False
+    print("⚠️ qrcode not available - will use text fallback")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,12 +35,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ================= VARIABLES =================
+print("=" * 60)
+print("🚀 APPLICATION STARTING...")
+print("=" * 60)
+
+# ================= ENVIRONMENT VARIABLES =================
+print("\n📋 Loading environment variables...")
+
 MAIN_BOT_TOKEN = os.environ.get("MAIN_BOT_TOKEN")
 PROVIDER_BOT_TOKEN = os.environ.get("PROVIDER_BOT_TOKEN")
 PROVIDER_BOT_USERNAME = os.environ.get("PROVIDER_BOT_USERNAME", "").replace("@", "")
 GPLINKS_API_KEY = os.environ.get("GPLINKS_API_KEY")
+
+# Fix DATABASE_URL for Render (postgres:// -> postgresql://)
 DATABASE_URL = os.environ.get("DATABASE_URL")
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    logger.info("✅ Fixed DATABASE_URL format for psycopg2")
+
 WEB_DOMAIN = os.environ.get("WEB_DOMAIN", "https://my-bot.onrender.com").strip()
 ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "ownermahi")
@@ -55,6 +72,8 @@ SUBSCRIPTION_AMOUNT = os.environ.get("SUBSCRIPTION_AMOUNT", "10")
 WAIT_TRIM, WAIT_FULL = range(2)
 BULK_WAIT_VIDEO, BULK_CONFIRM = range(2)
 
+print("✅ Environment variables loaded")
+
 # ================= DATABASE SETUP =================
 db_pool = None
 
@@ -62,9 +81,10 @@ def init_db_pool():
     global db_pool
     try:
         db_pool = pool.SimpleConnectionPool(1, 20, dsn=DATABASE_URL)
-        logger.info("Database pool created successfully")
+        logger.info("✅ Database pool created successfully")
+        print("✅ Database pool initialized")
     except Exception as e:
-        logger.error(f"Database pool creation failed: {e}")
+        logger.error(f"❌ Database pool creation failed: {e}")
         raise
 
 def setup_db():
@@ -125,11 +145,13 @@ def setup_db():
 
         conn.commit()
         cur.close()
-        logger.info("Database tables created/verified")
+        logger.info("✅ Database tables created/verified")
+        print("✅ Database tables ready")
     except Exception as e:
-        logger.error(f"Database setup failed: {e}")
+        logger.error(f"❌ Database setup failed: {e}")
         if conn:
             conn.rollback()
+        raise
     finally:
         if conn:
             db_pool.putconn(conn)
@@ -263,8 +285,6 @@ def generate_upi_qr(user_id, user_name, amount):
         f"&cu=INR"
     )
 
-    logger.info(f"UPI URL generated: {upi_url}")
-
     qr = qrcode.QRCode(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_H,
@@ -382,7 +402,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Server is Running!"
+    return "🤖 Bot Server Running! ✅"
 
 @app.route('/watch/<int:vid_id>')
 def watch_video(vid_id):
@@ -391,7 +411,10 @@ def watch_video(vid_id):
 
 def run_flask():
     port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    try:
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    except Exception as e:
+        logger.error(f"Flask error: {e}")
 
 # ================================================================
 #                    MAIN BOT (ADMIN ONLY)
@@ -452,8 +475,6 @@ async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return WAIT_TRIM
 
-# ================= MAIN BOT - FIXED TRIM HANDLING =================
-
 async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg:
@@ -499,7 +520,6 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAIT_FULL
 
-    # ===== TRIM VIDEO - YAHAN FIX HAI =====
     if msg.video or msg.document or msg.animation:
         raw_caption = msg.caption if msg.caption else ""
         cleaned_title = clean_title(raw_caption)
@@ -512,12 +532,8 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             context.user_data['trim_type'] = 'document'
 
-        # TRIM VIDEO KO SEPARATE STORE KARO - FULL_VIDEOS MEIN NAHI!
         context.user_data['trim_chat_id'] = msg.chat_id
         context.user_data['trim_msg_id'] = msg.message_id
-        
-        # ⚠️ YEH LINE NAHI CHAHIYE - TRIM VIDEO FULL LIST MEIN NAHI JAANA CHAHIYE
-        # context.user_data['full_videos'] list mein ADD NAHI KARO!
         
         await msg.reply_text(
             f"✅ <b>Trim Video Saved!</b>\n\n"
@@ -536,6 +552,89 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return WAIT_TRIM
 
+async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg:
+        return WAIT_FULL
+
+    if msg.text and msg.text.strip().lower() == '/done':
+        full_videos = context.user_data.get('full_videos', [])
+        if not full_videos:
+            await msg.reply_text("❌ Koi video nahi! Pehle video bhejo, phir /done.")
+            return WAIT_FULL
+        return await finalize_single_post(update, context)
+
+    if msg.text and msg.text.strip().lower() == '/cancel':
+        context.user_data.clear()
+        await msg.reply_text("❌ Upload cancelled.")
+        return ConversationHandler.END
+
+    if msg.text and msg.text.strip().lower() == '/start':
+        context.user_data.clear()
+        await msg.reply_text("🔄 Reset! Use /post to start again.")
+        return ConversationHandler.END
+
+    if not msg.video and not msg.document:
+        await msg.reply_text("❌ Video file bhejo! Ya /done / /cancel likho.")
+        return WAIT_FULL
+
+    raw_caption = msg.caption if msg.caption else ""
+    title = context.user_data.get('title', '')
+    if not title or title == "Exclusive Premium Content":
+        title = clean_title(raw_caption)
+        context.user_data['title'] = title
+
+    video_obj = msg.video
+    doc_obj = msg.document
+    duration = 0
+    quality_label, width, height, file_size = detect_quality_label(
+        video_obj=video_obj, document_obj=doc_obj, caption=raw_caption
+    )
+    if video_obj:
+        duration = video_obj.duration or 0
+
+    full_videos = context.user_data.get('full_videos', [])
+    for existing in full_videos:
+        if existing['file_size'] == file_size and file_size > 0:
+            existing_size_str = format_file_size(existing['file_size'])
+            await msg.reply_text(
+                f"⚠️ <b>Duplicate detected!</b>\n\n"
+                f"📦 File size <b>{format_file_size(file_size)}</b> already exists "
+                f"as <b>{existing['quality_label']}</b> ({existing_size_str})\n\n"
+                f"📹 Same size = same file. Different quality bhejo ya /done",
+                parse_mode='HTML'
+            )
+            return WAIT_FULL
+
+    video_data = {
+        'quality_label': quality_label,
+        'width': width,
+        'height': height,
+        'file_size': file_size,
+        'duration': duration,
+        'chat_id': msg.chat_id,
+        'msg_id': msg.message_id
+    }
+    full_videos.append(video_data)
+    context.user_data['full_videos'] = full_videos
+
+    count = len(full_videos)
+    size_str = format_file_size(file_size)
+    quality_list = "\n".join(
+        [f"  {i + 1}. {v['quality_label']} ({format_file_size(v['file_size'])})"
+         for i, v in enumerate(full_videos)]
+    )
+
+    await msg.reply_text(
+        f"✅ <b>Video #{count} Added!</b>\n\n"
+        f"📊 Quality: <b>{quality_label}</b>\n"
+        f"💾 Size: {size_str}\n"
+        f"⏱️ Duration: {duration}s\n\n"
+        f"📋 <b>All Qualities:</b>\n{quality_list}\n\n"
+        f"📹 Aur bhejo ya <code>/done</code> likho\n❌ Cancel: /cancel",
+        parse_mode='HTML'
+    )
+    return WAIT_FULL
 
 async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -548,7 +647,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     total = len(full_videos)
     status = await msg.reply_text(f"⏳ Processing {total} quality(ies)...")
 
-    # Create video entry in DB
     conn = None
     vid_id = None
     try:
@@ -569,7 +667,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     qualities_info = []
     failed_qualities = []
 
-    # ===== FULL VIDEOS UPLOAD KARO =====
     for idx, vdata in enumerate(full_videos):
         q_label = vdata['quality_label']
         src_chat_id = vdata['chat_id']
@@ -622,7 +719,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.clear()
         return ConversationHandler.END
 
-    # ===== FREE CHANNEL POST =====
     bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
     bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
     
@@ -634,9 +730,7 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     caption = build_free_channel_caption(title, qualities_info)
 
     if FREE_CH != 0:
-        # ===== YAHAN TRIM VIDEO USE KARO (agar available ho) =====
         if trim_type != 'skip' and trim_chat_id and trim_msg_id:
-            # Trim video/photo use karo for preview in free channel
             try:
                 await context.bot.copy_message(
                     chat_id=FREE_CH, 
@@ -649,7 +743,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
                 logger.info(f"Free channel: Posted trim video for {title}")
             except Exception as e:
                 logger.error(f"Trim video post failed: {e}")
-                # Fallback: Use first full video
                 try:
                     first_vid = full_videos[0]
                     await context.bot.copy_message(
@@ -663,7 +756,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
                 except Exception as e2:
                     logger.error(f"Fallback full video post failed: {e2}")
         else:
-            # No trim - use first full video
             try:
                 first_vid = full_videos[0]
                 await context.bot.copy_message(
@@ -677,7 +769,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
             except Exception as e:
                 logger.error(f"Free channel post failed: {e}")
 
-    # ===== SUCCESS MESSAGE =====
     q_str = ", ".join([f"{q['label']}({q['size']})" for q in qualities_info])
     fail_str = f"\n⚠️ Failed: {', '.join(failed_qualities)}" if failed_qualities else ""
     
@@ -942,7 +1033,6 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Provider /start from user {user.id} ({user_name}): {text}")
 
-    # ===== VIDEO LINK =====
     if text and "vid_" in text:
         try:
             vid_id = int(text.split("vid_")[1])
@@ -1028,7 +1118,6 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(schedule_delete(context, chat_id, err.message_id, TEXT_DELETE_TIME))
         return
 
-    # ===== NORMAL /start =====
     sub_status = ""
     is_active, end_date = check_active_subscription(user.id)
     if is_active and end_date:
@@ -1085,7 +1174,6 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
 
     logger.info(f"Callback from {user.id}: {data}")
 
-    # ========== QUALITY SELECTION ==========
     if data.startswith("quality_"):
         parts = data.split("_")
         vid_id = int(parts[1])
@@ -1122,7 +1210,6 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
-    # ========== ALL QUALITIES ==========
     if data.startswith("allquality_"):
         vid_id = int(data.split("_")[1])
         conn = None
@@ -1174,7 +1261,6 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
             )
         return
 
-    # ========== ADMIN: APPROVE ==========
     if data.startswith("approve_"):
         if user.id != ADMIN_USER_ID:
             await query.answer("❌ Only admin!", show_alert=True)
@@ -1247,17 +1333,8 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
                 )
         except Exception as e:
             logger.error(f"Invite link error: {e}")
-            try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_USER_ID,
-                    text=f"⚠️ User <code>{target_user_id}</code> ko link bhejne mein error: {e}",
-                    parse_mode='HTML'
-                )
-            except:
-                pass
         return
 
-    # ========== ADMIN: REJECT ==========
     if data.startswith("reject_"):
         if user.id != ADMIN_USER_ID:
             await query.answer("❌ Only admin!", show_alert=True)
@@ -1333,7 +1410,6 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     user_name = user.first_name
 
-    # ========== MENU BUTTONS ==========
     if text == "💎 Buy VIP":
         is_active, end_date = check_active_subscription(user.id)
         if is_active and end_date:
@@ -1421,7 +1497,6 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
         return
 
-    # ========== UTR NUMBER ==========
     if payment_step == 'utr':
         utr_number = msg.text.strip()
         if len(utr_number) < 4:
@@ -1649,16 +1724,6 @@ async def notify_expired_subs(provider_app_instance: Application):
                 )
             except Exception as e:
                 logger.error(f"Notify user {user_id} error: {e}")
-                
-            try:
-                status_text = "EXPIRED" if is_expired else f"Expires in {remaining}d"
-                await provider_app_instance.bot.send_message(
-                    chat_id=ADMIN_USER_ID,
-                    text=f"🔔 Sub Alert: User <code>{user_id}</code> - {status_text}",
-                    parse_mode='HTML'
-                )
-            except:
-                pass
 
             conn2 = None
             try:
@@ -1682,6 +1747,8 @@ async def notify_expired_subs(provider_app_instance: Application):
 # ================================================================
 
 async def run_bots():
+    print("\n🤖 Initializing bots...")
+    
     if not MAIN_BOT_TOKEN:
         logger.error("MAIN_BOT_TOKEN not found!")
         return
@@ -1692,7 +1759,10 @@ async def run_bots():
     if BACKUP_1 == 0:
         logger.warning("BACKUP_CHANNEL_1 not set! File URL mode won't work!")
 
+    print("✅ Tokens verified")
+
     # ============ MAIN BOT ============
+    print("\n⚙️  Configuring Main Bot (Admin)...")
     main_app = Application.builder().token(MAIN_BOT_TOKEN).build()
 
     upload_conv = ConversationHandler(
@@ -1737,9 +1807,10 @@ async def run_bots():
     )
     main_app.add_handler(bulk_conv)
     main_app.add_handler(CommandHandler('start', admin_start))
-    logger.info("Main Bot (Admin) handlers configured")
+    print("✅ Main Bot handlers configured")
 
     # ============ PROVIDER BOT ============
+    print("\n⚙️  Configuring Provider Bot (User)...")
     provider_app = Application.builder().token(PROVIDER_BOT_TOKEN).build()
     provider_app.add_handler(CommandHandler('start', provider_start))
     provider_app.add_handler(CommandHandler('cancel', provider_cancel))
@@ -1748,133 +1819,126 @@ async def run_bots():
     provider_app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, provider_handle_text
     ))
-    logger.info("Provider Bot (User) handlers configured")
+    print("✅ Provider Bot handlers configured")
 
     # ============ START BOTH ============
     try:
+        print("\n🚀 Starting Main Bot...")
         await main_app.initialize()
         await main_app.start()
         await main_app.updater.start_polling()
-        logger.info("Main Bot started!")
+        print("✅ Main Bot RUNNING!")
 
+        print("\n🚀 Starting Provider Bot...")
         await provider_app.initialize()
         await provider_app.start()
         await provider_app.updater.start_polling()
-        logger.info("Provider Bot started!")
+        print("✅ Provider Bot RUNNING!")
 
-        logger.info("=" * 50)
-        logger.info("BOTH BOTS RUNNING!")
-        logger.info(f"Admin Bot: ADMIN_USER_ID={ADMIN_USER_ID}")
-        logger.info(f"Admin Username: @{ADMIN_USERNAME}")
-        logger.info(f"Provider Bot: @{PROVIDER_BOT_USERNAME}")
-        logger.info(f"Backup Channel: {BACKUP_1}")
-        logger.info(f"Video Delete: {AUTO_DELETE_TIME}s | Text Delete: {TEXT_DELETE_TIME}s")
-        logger.info(f"QR Delete: {QR_DELETE_TIME}s")
-        logger.info(f"QR Code: {'Available' if QR_AVAILABLE else 'Not Available (text fallback)'}")
-        logger.info("=" * 50)
+        print("\n" + "=" * 60)
+        print("🎉 BOTH BOTS RUNNING SUCCESSFULLY!")
+        print("=" * 60)
+        print(f"👤 Admin User ID: {ADMIN_USER_ID}")
+        print(f"👤 Admin Username: @{ADMIN_USERNAME}")
+        print(f"🤖 Provider Bot: @{PROVIDER_BOT_USERNAME}")
+        print(f"📦 Backup Channel: {BACKUP_1}")
+        print(f"🆓 Free Channel: {FREE_CH if FREE_CH != 0 else 'Not Set'}")
+        print(f"💎 Paid Channel: {PAID_CH if PAID_CH != 0 else 'Not Set'}")
+        print(f"🕒 Video Auto-Delete: {AUTO_DELETE_TIME}s")
+        print(f"🕒 Text Auto-Delete: {TEXT_DELETE_TIME}s")
+        print(f"🕒 QR Auto-Delete: {QR_DELETE_TIME}s")
+        print(f"📱 QR Code: {'Available' if QR_AVAILABLE else 'Text Fallback'}")
+        print(f"💰 Subscription: ₹{SUBSCRIPTION_AMOUNT}/month")
+        print("=" * 60)
 
+        print("\n🔄 Starting background tasks...")
         asyncio.create_task(periodic_cleanup(None))
         asyncio.create_task(notify_expired_subs(provider_app))
-        logger.info("Background tasks started")
+        print("✅ Background tasks started")
+
+        print("\n✨ System ready! Waiting for commands...\n")
 
         while True:
             await asyncio.sleep(3600)
 
     except Exception as e:
-        logger.error(f"Startup error: {e}")
+        logger.error(f"❌ Runtime error: {e}", exc_info=True)
         raise
     finally:
-        await main_app.updater.stop()
-        await main_app.stop()
-        await main_app.shutdown()
-        await provider_app.updater.stop()
-        await provider_app.stop()
-        await provider_app.shutdown()
+        print("\n🛑 Shutting down bots...")
+        try:
+            await main_app.updater.stop()
+            await main_app.stop()
+            await main_app.shutdown()
+        except:
+            pass
+        try:
+            await provider_app.updater.stop()
+            await provider_app.stop()
+            await provider_app.shutdown()
+        except:
+            pass
+        print("✅ Shutdown complete")
 
 # ================================================================
-#                    STARTUP WITH BETTER ERROR HANDLING
+#                    MAIN ENTRY POINT
 # ================================================================
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("🚀 STARTING APPLICATION...")
+    print("\n" + "=" * 60)
+    print("🔍 PRE-FLIGHT CHECKS")
     print("=" * 60)
     
-    # ===== ENV VARS CHECK =====
+    # Check required env vars
     required = ['MAIN_BOT_TOKEN', 'PROVIDER_BOT_TOKEN', 'DATABASE_URL']
     missing = [v for v in required if not os.environ.get(v)]
     if missing:
-        logger.error(f"❌ Missing environment variables: {', '.join(missing)}")
-        print(f"❌ ERROR: Missing env vars: {', '.join(missing)}")
-        print("Set these in Render dashboard → Environment")
+        print(f"❌ ERROR: Missing environment variables: {', '.join(missing)}")
+        print("\n📝 Set these in Render dashboard → Environment tab")
         exit(1)
+    print("✅ Required environment variables present")
 
-    # ===== BACKUP CHANNEL CHECK =====
+    # Check backup channel
     if BACKUP_1 == 0:
-        logger.error("❌ BACKUP_CHANNEL_1 is REQUIRED!")
-        print("❌ ERROR: BACKUP_CHANNEL_1 not set!")
-        print("Set BACKUP_CHANNEL_1 env variable (e.g. -1002683355160)")
-        print("Both bots must be admin of this channel!")
+        print("❌ ERROR: BACKUP_CHANNEL_1 is REQUIRED!")
+        print("\n📝 Set BACKUP_CHANNEL_1 env variable (e.g. -1002683355160)")
+        print("⚠️  Both bots must be admin of this channel!")
         exit(1)
+    print(f"✅ Backup channel configured: {BACKUP_1}")
 
-    # ===== DATABASE INIT =====
-    print("\n📊 Initializing database pool...")
+    # Initialize database
+    print("\n📊 Initializing database...")
     try:
         init_db_pool()
-        print("✅ Database pool created")
-    except Exception as e:
-        logger.error(f"❌ Database pool init failed: {e}")
-        print(f"❌ DATABASE ERROR: {e}")
-        print("Check your DATABASE_URL format")
-        exit(1)
-
-    print("\n📋 Setting up database tables...")
-    try:
         setup_db()
-        print("✅ Database tables ready")
+        print("✅ Database ready")
     except Exception as e:
-        logger.error(f"❌ Database setup failed: {e}")
-        print(f"❌ TABLE SETUP ERROR: {e}")
+        print(f"❌ DATABASE ERROR: {e}")
+        logger.error(f"DB init failed: {e}", exc_info=True)
         exit(1)
 
-    # ===== FLASK WEB SERVER =====
-    print("\n🌐 Starting Flask web server...")
+    # Start Flask
+    print("\n🌐 Starting web server...")
     try:
         flask_thread = Thread(target=run_flask, daemon=True)
         flask_thread.start()
-        print("✅ Flask started on port", os.environ.get('PORT', 8080))
+        print(f"✅ Web server started on port {os.environ.get('PORT', 8080)}")
     except Exception as e:
-        logger.error(f"❌ Flask start failed: {e}")
         print(f"❌ FLASK ERROR: {e}")
         exit(1)
 
-    # ===== PRINT CONFIG =====
+    # Run bots
     print("\n" + "=" * 60)
-    print("⚙️  CONFIGURATION:")
+    print("🚀 LAUNCHING TELEGRAM BOTS")
     print("=" * 60)
-    print(f"Admin User ID: {ADMIN_USER_ID}")
-    print(f"Admin Username: @{ADMIN_USERNAME}")
-    print(f"Provider Bot: @{PROVIDER_BOT_USERNAME}")
-    print(f"Backup Channel: {BACKUP_1}")
-    print(f"Free Channel: {FREE_CH if FREE_CH != 0 else 'Not Set'}")
-    print(f"Paid Channel: {PAID_CH if PAID_CH != 0 else 'Not Set'}")
-    print(f"Video Delete Time: {AUTO_DELETE_TIME}s")
-    print(f"Text Delete Time: {TEXT_DELETE_TIME}s")
-    print(f"QR Delete Time: {QR_DELETE_TIME}s")
-    print(f"QR Code Available: {'Yes' if QR_AVAILABLE else 'No (text fallback)'}")
-    print(f"Subscription Amount: ₹{SUBSCRIPTION_AMOUNT}")
-    print("=" * 60)
-
-    # ===== START BOTS =====
-    print("\n🤖 Starting Telegram bots...")
+    
     try:
         asyncio.run(run_bots())
     except KeyboardInterrupt:
-        print("\n🛑 Shutting down gracefully...")
-        logger.info("Shutdown by user")
+        print("\n\n🛑 Interrupted by user")
     except Exception as e:
-        logger.error(f"❌ FATAL ERROR: {e}", exc_info=True)
-        print(f"\n❌ FATAL ERROR: {e}")
+        print(f"\n\n❌ FATAL ERROR: {e}")
+        logger.error(f"Fatal error: {e}", exc_info=True)
         import traceback
         traceback.print_exc()
         exit(1)
