@@ -506,6 +506,7 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['trim_type'] = 'photo'
         context.user_data['trim_chat_id'] = msg.chat_id
         context.user_data['trim_msg_id'] = msg.message_id
+        context.user_data['original_html'] = msg.caption_html
         raw_caption = msg.caption if msg.caption else ""
         cleaned_title = clean_title(raw_caption)
         if cleaned_title != "Exclusive Premium Content":
@@ -521,9 +522,11 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAIT_FULL
 
     if msg.video or msg.document or msg.animation:
-        raw_caption = msg.caption if msg.caption else ""
-        cleaned_title = clean_title(raw_caption)
-        context.user_data['title'] = cleaned_title
+        # ... aapka pehle ka code
+        context.user_data['trim_chat_id'] = msg.chat_id
+        context.user_data['trim_msg_id'] = msg.message_id
+        # 👇 YEH NAYI LINE ADD KARO 👇
+        context.user_data['original_html'] = msg.caption_html
 
         if msg.video:
             context.user_data['trim_type'] = 'video'
@@ -727,7 +730,19 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("💎 Buy VIP Subscription", url=f"https://t.me/{bot_username}")]
     ])
 
-    caption = build_free_channel_caption(title, qualities_info)
+    original_html = context.user_data.get('original_html')
+
+    if original_html:
+        import re
+        # Agar caption pehle se hai, toh sirf 'WATCH & DOWNLOAD' aur 'HOW TO OPEN' hatao
+        caption = re.sub(r'╔═══════════════════╗.*?╚═══════════════════╝', '', original_html, flags=re.DOTALL)
+        caption = re.sub(r'[^\n]*ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ ᴛʜᴇ ʟɪɴᴋ[^\n]*', '', caption, flags=re.IGNORECASE)
+        caption = re.sub(r'[^\n]*HOW TO OPEN THE LINK[^\n]*', '', caption, flags=re.IGNORECASE)
+        # Extra khali lines hata do
+        caption = re.sub(r'\n\s*\n\s*\n', '\n\n', caption).strip()
+    else:
+        # Agar blank image/video aayi hai bina kisi caption ke, tab bot apna likhega
+        caption = build_free_channel_caption(title, qualities_info)
 
     if FREE_CH != 0:
         if trim_type != 'skip' and trim_chat_id and trim_msg_id:
@@ -758,14 +773,23 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             try:
                 first_vid = full_videos[0]
-                await context.bot.copy_message(
-                    chat_id=FREE_CH, 
-                    from_chat_id=first_vid['chat_id'],
-                    message_id=first_vid['msg_id'], 
-                    caption=caption, 
-                    parse_mode='HTML', 
-                    reply_markup=post_keyboard
-                )
+                if first_vid.get('thumb_id'):
+                    # Agar video mein thumbnail (poster) hai, toh usko as a Photo bhejo
+                    await context.bot.send_photo(
+                        chat_id=FREE_CH,
+                        photo=first_vid['thumb_id'],
+                        caption=caption,
+                        parse_mode='HTML',
+                        reply_markup=post_keyboard
+                    )
+                else:
+                    # Agar thumbnail nahi mila, toh sirf text message bhej do (Ban hone se bachane ke liye)
+                    await context.bot.send_message(
+                        chat_id=FREE_CH,
+                        text=caption,
+                        parse_mode='HTML',
+                        reply_markup=post_keyboard
+                    )
             except Exception as e:
                 logger.error(f"Free channel post failed: {e}")
 
@@ -852,6 +876,11 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return BULK_WAIT_VIDEO
 
+    # Thumbnail nikalne ka code
+    thumb_id = None
+    if video_obj and video_obj.thumbnail:
+        thumb_id = video_obj.thumbnail.file_id
+
     video_data = {
         'quality_label': quality_label,
         'width': width,
@@ -859,7 +888,8 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         'file_size': file_size,
         'duration': duration,
         'chat_id': msg.chat_id,
-        'msg_id': msg.message_id
+        'msg_id': msg.message_id,
+        'thumb_id': thumb_id  # 👈 YEH NAYI LINE ADD KI HAI
     }
     bulk_videos[title].append(video_data)
     context.user_data['bulk_videos'] = bulk_videos
