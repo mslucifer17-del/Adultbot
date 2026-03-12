@@ -770,29 +770,18 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
                     )
                 except Exception as e2:
                     logger.error(f"Fallback full video post failed: {e2}")
-        else: # Agar trim video/photo nahi hai (/skip kiya hai)
+        else:
             try:
                 first_vid = full_videos[0]
-                thumb_id = first_vid.get('thumb_id')
                 
-                if thumb_id:
-                    # Telegram ka banaya hua poster as a Photo post karo
-                    await context.bot.send_photo(
-                        chat_id=FREE_CH, 
-                        photo=thumb_id,
-                        caption=caption, 
-                        parse_mode='HTML', 
-                        reply_markup=post_keyboard
-                    )
-                else:
-                    # Agar Telegram ne poster generate NAHI kiya, toh sirf error dikhao
-                    await update.message.reply_text(
-                        "❌ <b>ERROR: Poster Nahi Mila!</b>\n\n"
-                        "Telegram ne is video ka auto-generated poster nahi banaya hai.\n"
-                        "Channel safe rakhne ke liye free channel par text post <b>nahi</b> kiya gaya.\n\n"
-                        "👉 <i>Dobara /post use karein aur /skip karne ki bajaye ek photo bhejein.</i>",
-                        parse_mode='HTML'
-                    )
+                # Seedha poster as a photo free channel par post karo
+                await context.bot.send_photo(
+                    chat_id=FREE_CH, 
+                    photo=first_vid['thumb_id'],
+                    caption=caption, 
+                    parse_mode='HTML', 
+                    reply_markup=post_keyboard
+                )
             except Exception as e:
                 logger.error(f"Free channel post failed: {e}")
 
@@ -879,12 +868,12 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return BULK_WAIT_VIDEO
 
-    # Telegram ka auto-generated poster nikalne ka code
+    # Telegram ka poster/thumbnail nikalna
     thumb_id = None
-    if msg.video and msg.video.thumbnail:
-        thumb_id = msg.video.thumbnail.file_id
-    elif msg.document and msg.document.thumbnail:
-        thumb_id = msg.document.thumbnail.file_id
+    if video_obj and video_obj.thumbnail:
+        thumb_id = video_obj.thumbnail.file_id
+    elif doc_obj and doc_obj.thumbnail:
+        thumb_id = doc_obj.thumbnail.file_id
 
     video_data = {
         'quality_label': quality_label,
@@ -894,7 +883,7 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         'duration': duration,
         'chat_id': msg.chat_id,
         'msg_id': msg.message_id,
-        'thumb_id': thumb_id  # 👈 Poster ki ID yahan save ho jayegi
+        'thumb_id': thumb_id  # 👈 Poster ki ID
     }
     bulk_videos[title].append(video_data)
     context.user_data['bulk_videos'] = bulk_videos
