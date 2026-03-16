@@ -522,10 +522,13 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAIT_FULL
 
     if msg.video or msg.document or msg.animation:
-        # ... aapka pehle ka code
+        raw_caption = msg.caption if msg.caption else ""
+        cleaned_title = clean_title(raw_caption)
+        if cleaned_title != "Exclusive Premium Content":
+            context.user_data['title'] = cleaned_title
+
         context.user_data['trim_chat_id'] = msg.chat_id
         context.user_data['trim_msg_id'] = msg.message_id
-        # 👇 YEH NAYI LINE ADD KARO 👇
         context.user_data['original_html'] = msg.caption_html
 
         if msg.video:
@@ -535,9 +538,6 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             context.user_data['trim_type'] = 'document'
 
-        context.user_data['trim_chat_id'] = msg.chat_id
-        context.user_data['trim_msg_id'] = msg.message_id
-        
         await msg.reply_text(
             f"✅ <b>Trim Video Saved!</b>\n\n"
             f"📝 Title: {html_escape(cleaned_title)}\n\n"
@@ -596,6 +596,13 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     if video_obj:
         duration = video_obj.duration or 0
 
+    # 👇 Thumbnail store karo
+    thumb_id = None
+    if video_obj and video_obj.thumbnail:
+        thumb_id = video_obj.thumbnail.file_id
+    elif doc_obj and doc_obj.thumbnail:
+        thumb_id = doc_obj.thumbnail.file_id
+
     full_videos = context.user_data.get('full_videos', [])
     for existing in full_videos:
         if existing['file_size'] == file_size and file_size > 0:
@@ -616,7 +623,8 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         'file_size': file_size,
         'duration': duration,
         'chat_id': msg.chat_id,
-        'msg_id': msg.message_id
+        'msg_id': msg.message_id,
+        'thumb_id': thumb_id   # 👈 Thumbnail ID yahan store kiya
     }
     full_videos.append(video_data)
     context.user_data['full_videos'] = full_videos
@@ -723,27 +731,27 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
+    # 👇 Buy VIP button deep link banaya
     bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
+    buy_link = f"https://t.me/{bot_username}?start=buy"
     
     post_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📥 Watch Now / Download 📥", url=bot_link)],
-        [InlineKeyboardButton("💎 Buy VIP Subscription", url=f"https://t.me/{bot_username}")]
+        [InlineKeyboardButton("💎 Buy VIP Subscription", url=buy_link)]   # 👈 Deep link
     ])
 
     original_html = context.user_data.get('original_html')
 
     if original_html:
         import re
-        # Agar caption pehle se hai, toh sirf 'WATCH & DOWNLOAD' aur 'HOW TO OPEN' hatao
         caption = re.sub(r'╔═══════════════════╗.*?╚═══════════════════╝', '', original_html, flags=re.DOTALL)
         caption = re.sub(r'[^\n]*ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ ᴛʜᴇ ʟɪɴᴋ[^\n]*', '', caption, flags=re.IGNORECASE)
         caption = re.sub(r'[^\n]*HOW TO OPEN THE LINK[^\n]*', '', caption, flags=re.IGNORECASE)
-        # Extra khali lines hata do
         caption = re.sub(r'\n\s*\n\s*\n', '\n\n', caption).strip()
     else:
-        # Agar blank image/video aayi hai bina kisi caption ke, tab bot apna likhega
         caption = build_free_channel_caption(title, qualities_info)
 
+    # 👇 Free channel par post
     if FREE_CH != 0:
         if trim_type != 'skip' and trim_chat_id and trim_msg_id:
             try:
@@ -758,32 +766,68 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
                 logger.info(f"Free channel: Posted trim video for {title}")
             except Exception as e:
                 logger.error(f"Trim video post failed: {e}")
+                # Fallback: first video ka thumbnail bhejo
+                first_vid = full_videos[0]
+                thumb_id = first_vid.get('thumb_id')
+                if thumb_id:
+                    try:
+                        await context.bot.send_photo(
+                            chat_id=FREE_CH,
+                            photo=thumb_id,
+                            caption=caption,
+                            parse_mode='HTML',
+                            reply_markup=post_keyboard
+                        )
+                    except Exception as e2:
+                        logger.error(f"Fallback photo failed: {e2}")
+                else:
+                    # Last resort: text message with button
+                    try:
+                        await context.bot.send_message(
+                            chat_id=FREE_CH,
+                            text=caption + "\n\n(Preview unavailable)",
+                            parse_mode='HTML',
+                            reply_markup=post_keyboard
+                        )
+                    except Exception as e3:
+                        logger.error(f"Fallback text failed: {e3}")
+        else:
+            first_vid = full_videos[0]
+            thumb_id = first_vid.get('thumb_id')
+            if thumb_id:
                 try:
-                    first_vid = full_videos[0]
-                    await context.bot.copy_message(
-                        chat_id=FREE_CH, 
-                        from_chat_id=first_vid['chat_id'],
-                        message_id=first_vid['msg_id'], 
-                        caption=caption, 
-                        parse_mode='HTML', 
+                    await context.bot.send_photo(
+                        chat_id=FREE_CH,
+                        photo=thumb_id,
+                        caption=caption,
+                        parse_mode='HTML',
                         reply_markup=post_keyboard
                     )
-                except Exception as e2:
-                    logger.error(f"Fallback full video post failed: {e2}")
-        else:
-            try:
-                first_vid = full_videos[0]
-                
-                # Seedha poster as a photo free channel par post karo
-                await context.bot.send_photo(
-                    chat_id=FREE_CH, 
-                    photo=first_vid['thumb_id'],
-                    caption=caption, 
-                    parse_mode='HTML', 
-                    reply_markup=post_keyboard
-                )
-            except Exception as e:
-                logger.error(f"Free channel post failed: {e}")
+                except Exception as e:
+                    logger.error(f"Photo post failed: {e}")
+                    # fallback to copy first video (but that gives full video)
+                    try:
+                        await context.bot.copy_message(
+                            chat_id=FREE_CH, 
+                            from_chat_id=first_vid['chat_id'],
+                            message_id=first_vid['msg_id'], 
+                            caption=caption, 
+                            parse_mode='HTML', 
+                            reply_markup=post_keyboard
+                        )
+                    except Exception as e2:
+                        logger.error(f"Fallback copy failed: {e2}")
+            else:
+                # no thumbnail, send text
+                try:
+                    await context.bot.send_message(
+                        chat_id=FREE_CH,
+                        text=caption + "\n\n(Click below to watch)",
+                        parse_mode='HTML',
+                        reply_markup=post_keyboard
+                    )
+                except Exception as e:
+                    logger.error(f"Text fallback failed: {e}")
 
     q_str = ", ".join([f"{q['label']}({q['size']})" for q in qualities_info])
     fail_str = f"\n⚠️ Failed: {', '.join(failed_qualities)}" if failed_qualities else ""
@@ -856,6 +900,12 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if video_obj:
         duration = video_obj.duration or 0
 
+    thumb_id = None
+    if video_obj and video_obj.thumbnail:
+        thumb_id = video_obj.thumbnail.file_id
+    elif doc_obj and doc_obj.thumbnail:
+        thumb_id = doc_obj.thumbnail.file_id
+
     bulk_videos = context.user_data.get('bulk_videos', {})
     if title not in bulk_videos:
         bulk_videos[title] = []
@@ -868,13 +918,6 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return BULK_WAIT_VIDEO
 
-    # Telegram ka poster/thumbnail nikalna
-    thumb_id = None
-    if video_obj and video_obj.thumbnail:
-        thumb_id = video_obj.thumbnail.file_id
-    elif doc_obj and doc_obj.thumbnail:
-        thumb_id = doc_obj.thumbnail.file_id
-
     video_data = {
         'quality_label': quality_label,
         'width': width,
@@ -883,7 +926,7 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         'duration': duration,
         'chat_id': msg.chat_id,
         'msg_id': msg.message_id,
-        'thumb_id': thumb_id  # 👈 Poster ki ID
+        'thumb_id': thumb_id
     }
     bulk_videos[title].append(video_data)
     context.user_data['bulk_videos'] = bulk_videos
@@ -914,6 +957,9 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
 
     processed = 0
     results = []
+
+    bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
+    buy_link = f"https://t.me/{bot_username}?start=buy"
 
     for title, video_list in bulk_videos.items():
         processed += 1
@@ -994,32 +1040,50 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             results.append(f"❌ {generate_display_title(title)}: All backups failed!")
             continue
 
-        bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
         bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
         
         post_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📥 Watch Now / Download 📥", url=bot_link)],
-            [InlineKeyboardButton("💎 Buy VIP Subscription", url=f"https://t.me/{bot_username}")]
+            [InlineKeyboardButton("💎 Buy VIP Subscription", url=buy_link)]
         ])
 
         caption = build_free_channel_caption(title, qualities_info)
 
+        # 👇 Free channel post with thumbnail
         if FREE_CH != 0:
             first_vid = video_list[0]
-            try:
-                await context.bot.copy_message(
-                    chat_id=FREE_CH, from_chat_id=first_vid['chat_id'],
-                    message_id=first_vid['msg_id'], caption=caption, parse_mode='HTML',
-                    reply_markup=post_keyboard
-                )
-            except:
+            thumb_id = first_vid.get('thumb_id')
+            if thumb_id:
                 try:
-                    await context.bot.send_message(
-                        chat_id=FREE_CH, text=caption, parse_mode='HTML',
+                    await context.bot.send_photo(
+                        chat_id=FREE_CH,
+                        photo=thumb_id,
+                        caption=caption,
+                        parse_mode='HTML',
                         reply_markup=post_keyboard
                     )
-                except Exception as e2:
-                    logger.error(f"Free channel failed: {e2}")
+                except Exception as e:
+                    logger.error(f"Bulk photo post failed: {e}")
+                    # fallback to text
+                    try:
+                        await context.bot.send_message(
+                            chat_id=FREE_CH,
+                            text=caption,
+                            parse_mode='HTML',
+                            reply_markup=post_keyboard
+                        )
+                    except Exception as e2:
+                        logger.error(f"Bulk text fallback failed: {e2}")
+            else:
+                try:
+                    await context.bot.send_message(
+                        chat_id=FREE_CH,
+                        text=caption,
+                        parse_mode='HTML',
+                        reply_markup=post_keyboard
+                    )
+                except Exception as e:
+                    logger.error(f"Bulk text fallback failed: {e}")
 
         q_str = ", ".join([f"{q['label']}({q['size']})" for q in qualities_info])
         results.append(f"✅ {generate_display_title(title)}: {q_str}")
@@ -1056,6 +1120,12 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = user.first_name
 
     logger.info(f"Provider /start from user {user.id} ({user_name}): {text}")
+
+    # 👇 Handle buy parameter
+    if text and "buy" in text:
+        # Directly trigger buy flow
+        await provider_handle_buy(update, context)
+        return
 
     if text and "vid_" in text:
         try:
@@ -1174,6 +1244,87 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     asyncio.create_task(schedule_delete(context, chat_id, welcome.message_id, TEXT_DELETE_TIME))
     asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, TEXT_DELETE_TIME))
+
+async def provider_handle_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct buy flow triggered by /start buy"""
+    msg = update.message
+    chat_id = msg.chat_id
+    user = update.effective_user
+    user_name = user.first_name
+
+    # Check if already subscribed
+    is_active, end_date = check_active_subscription(user.id)
+    if is_active and end_date:
+        remaining = (end_date - datetime.now()).days
+        active_msg = await msg.reply_text(
+            f"✅ <b>Tumhari subscription already active hai!</b>\n\n"
+            f"📅 Expires: {end_date.strftime('%d-%m-%Y')}\n"
+            f"⏳ {remaining} days remaining",
+            parse_mode='HTML'
+        )
+        asyncio.create_task(schedule_delete(context, chat_id, active_msg.message_id, TEXT_DELETE_TIME))
+        return
+
+    amount = SUBSCRIPTION_AMOUNT
+    context.user_data['payment_step'] = 'screenshot'
+
+    try:
+        if QR_AVAILABLE:
+            qr_image, note = generate_upi_qr(user.id, user_name, amount)
+            qr_validity_minutes = 10
+            expiry_time = datetime.now() + timedelta(minutes=qr_validity_minutes)
+            context.user_data['qr_expiry'] = expiry_time
+            context.user_data['payment_note'] = note
+
+            qr_msg = await msg.reply_photo(
+                photo=qr_image,
+                caption=(
+                    f"💎 <b>VIP Subscription - {amount}₹ / Month</b>\n\n"
+                    f"📱 <b>Scan QR Code</b> from any UPI app:\n"
+                    f"  • Google Pay / PhonePe / Paytm\n\n"
+                    f"💰 Amount: <b>₹{amount}</b> (pre-filled)\n"
+                    f"📝 Note: <code>{note}</code> (auto-filled)\n\n"
+                    f"⚠️ <b>Important:</b>\n"
+                    f"  • Amount/Note change MAT karna\n"
+                    f"  • QR valid for <b>{qr_validity_minutes} min</b>\n"
+                    f"  • Expiry: <b>{expiry_time.strftime('%H:%M:%S')}</b>\n\n"
+                    f"━━━━━━━━━━━━━━━━━━━\n"
+                    f"✅ Payment ke baad:\n"
+                    f"1️⃣ <b>Screenshot</b> bhejo\n"
+                    f"2️⃣ Phir <b>UTR Number</b> type karke bhejo\n\n"
+                    f"📸 <b>Payment karo aur screenshot bhejo...</b>\n\n"
+                    f"❌ Cancel: /cancel"
+                ),
+                parse_mode='HTML'
+            )
+            asyncio.create_task(schedule_delete(context, chat_id, qr_msg.message_id, QR_DELETE_TIME))
+        else:
+            raise Exception("qrcode library not available")
+
+    except Exception as e:
+        logger.error(f"QR generation failed: {e}")
+        safe_name = re.sub(r'[^a-zA-Z0-9 ]', '', user_name)[:30].strip()
+        if not safe_name: 
+            safe_name = "User"
+        note = f"TG-{user.id}-{safe_name}"
+        context.user_data['payment_note'] = note
+
+        fallback_msg = await msg.reply_text(
+            f"💎 <b>VIP Subscription - {amount}₹ / Month</b>\n\n"
+            f"💳 <b>UPI ID:</b> <code>{UPI_ID}</code>\n"
+            f"💰 <b>Amount:</b> ₹{amount}\n"
+            f"📝 <b>Note mein likho:</b> <code>{note}</code>\n\n"
+            f"⚠️ <b>Steps:</b>\n"
+            f"1️⃣ UPI par ₹{amount} pay karo\n"
+            f"2️⃣ Note mein <code>{note}</code> likho\n"
+            f"3️⃣ Screenshot bhejo\n"
+            f"4️⃣ UTR number bhejo\n\n"
+            f"❌ Cancel: /cancel",
+            parse_mode='HTML'
+        )
+        asyncio.create_task(schedule_delete(context, chat_id, fallback_msg.message_id, QR_DELETE_TIME))
+    
+    asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
 
 async def provider_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('payment_step', None)
@@ -1435,78 +1586,7 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
     user_name = user.first_name
 
     if text == "💎 Buy VIP":
-        is_active, end_date = check_active_subscription(user.id)
-        if is_active and end_date:
-            remaining = (end_date - datetime.now()).days
-            active_msg = await msg.reply_text(
-                f"✅ <b>Tumhari subscription already active hai!</b>\n\n"
-                f"📅 Expires: {end_date.strftime('%d-%m-%Y')}\n"
-                f"⏳ {remaining} days remaining",
-                parse_mode='HTML'
-            )
-            asyncio.create_task(schedule_delete(context, chat_id, active_msg.message_id, TEXT_DELETE_TIME))
-            return
-
-        amount = SUBSCRIPTION_AMOUNT
-        context.user_data['payment_step'] = 'screenshot'
-
-        try:
-            if QR_AVAILABLE:
-                qr_image, note = generate_upi_qr(user.id, user_name, amount)
-                qr_validity_minutes = 10
-                expiry_time = datetime.now() + timedelta(minutes=qr_validity_minutes)
-                context.user_data['qr_expiry'] = expiry_time
-                context.user_data['payment_note'] = note
-
-                qr_msg = await msg.reply_photo(
-                    photo=qr_image,
-                    caption=(
-                        f"💎 <b>VIP Subscription - {amount}₹ / Month</b>\n\n"
-                        f"📱 <b>Scan QR Code</b> from any UPI app:\n"
-                        f"  • Google Pay / PhonePe / Paytm\n\n"
-                        f"💰 Amount: <b>₹{amount}</b> (pre-filled)\n"
-                        f"📝 Note: <code>{note}</code> (auto-filled)\n\n"
-                        f"⚠️ <b>Important:</b>\n"
-                        f"  • Amount/Note change MAT karna\n"
-                        f"  • QR valid for <b>{qr_validity_minutes} min</b>\n"
-                        f"  • Expiry: <b>{expiry_time.strftime('%H:%M:%S')}</b>\n\n"
-                        f"━━━━━━━━━━━━━━━━━━━\n"
-                        f"✅ Payment ke baad:\n"
-                        f"1️⃣ <b>Screenshot</b> bhejo\n"
-                        f"2️⃣ Phir <b>UTR Number</b> type karke bhejo\n\n"
-                        f"📸 <b>Payment karo aur screenshot bhejo...</b>\n\n"
-                        f"❌ Cancel: /cancel"
-                    ),
-                    parse_mode='HTML'
-                )
-                asyncio.create_task(schedule_delete(context, chat_id, qr_msg.message_id, QR_DELETE_TIME))
-            else:
-                raise Exception("qrcode library not available")
-
-        except Exception as e:
-            logger.error(f"QR generation failed: {e}")
-            safe_name = re.sub(r'[^a-zA-Z0-9 ]', '', user_name)[:30].strip()
-            if not safe_name: 
-                safe_name = "User"
-            note = f"TG-{user.id}-{safe_name}"
-            context.user_data['payment_note'] = note
-
-            fallback_msg = await msg.reply_text(
-                f"💎 <b>VIP Subscription - {amount}₹ / Month</b>\n\n"
-                f"💳 <b>UPI ID:</b> <code>{UPI_ID}</code>\n"
-                f"💰 <b>Amount:</b> ₹{amount}\n"
-                f"📝 <b>Note mein likho:</b> <code>{note}</code>\n\n"
-                f"⚠️ <b>Steps:</b>\n"
-                f"1️⃣ UPI par ₹{amount} pay karo\n"
-                f"2️⃣ Note mein <code>{note}</code> likho\n"
-                f"3️⃣ Screenshot bhejo\n"
-                f"4️⃣ UTR number bhejo\n\n"
-                f"❌ Cancel: /cancel",
-                parse_mode='HTML'
-            )
-            asyncio.create_task(schedule_delete(context, chat_id, fallback_msg.message_id, QR_DELETE_TIME))
-        
-        asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
+        await provider_handle_buy(update, context)
         return
 
     elif text == "🆓 Free Channel":
@@ -1642,7 +1722,7 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
     )
 
     join_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💎 Buy VIP Access", url=f"https://t.me/{ADMIN_USERNAME}")],
+        [InlineKeyboardButton("💎 Buy VIP Access", url=f"https://t.me/{PROVIDER_BOT_USERNAME}?start=buy")],
         [InlineKeyboardButton("🆓 Join Free Channel", url=FREE_CHANNEL_LINK)]
     ])
 
