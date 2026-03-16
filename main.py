@@ -416,6 +416,32 @@ def run_flask():
     except Exception as e:
         logger.error(f"Flask error: {e}")
 
+# ================= NEW HELPER FOR THUMBNAIL AS PHOTO =================
+async def send_thumbnail_as_photo(context, chat_id, thumb_id, caption, reply_markup=None):
+    """
+    Thumbnail file_id ko download karke photo ki tarah bhejta hai.
+    Returns: sent message object ya None agar fail ho jaye.
+    """
+    try:
+        file = await context.bot.get_file(thumb_id)
+        thumb_bytes = await file.download_as_bytearray()
+        
+        photo_file = BytesIO(thumb_bytes)
+        photo_file.name = "thumbnail.jpg"
+        
+        msg = await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=photo_file,
+            caption=caption,
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        logger.info(f"Thumbnail successfully sent as photo to {chat_id}")
+        return msg
+    except Exception as e:
+        logger.error(f"Failed to send thumbnail as photo: {e}")
+        return None
+
 # ================================================================
 #                    MAIN BOT (ADMIN ONLY)
 # ================================================================
@@ -731,13 +757,13 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
-    # 👇 Buy VIP button deep link banaya
+    # 👇 Buy VIP button deep link
     bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
     buy_link = f"https://t.me/{bot_username}?start=buy"
     
     post_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📥 Watch Now / Download 📥", url=bot_link)],
-        [InlineKeyboardButton("💎 Buy VIP Subscription", url=buy_link)]   # 👈 Deep link
+        [InlineKeyboardButton("💎 Buy VIP Subscription", url=buy_link)]
     ])
 
     original_html = context.user_data.get('original_html')
@@ -751,9 +777,10 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         caption = build_free_channel_caption(title, qualities_info)
 
-    # 👇 Free channel par post
+    # 👇 Free channel par post (thumbnail as photo)
     if FREE_CH != 0:
         if trim_type != 'skip' and trim_chat_id and trim_msg_id:
+            # Trim wali post karo
             try:
                 await context.bot.copy_message(
                     chat_id=FREE_CH, 
@@ -765,69 +792,55 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
                 logger.info(f"Free channel: Posted trim video for {title}")
             except Exception as e:
-                logger.error(f"Trim video post failed: {e}")
-                # Fallback: first video ka thumbnail bhejo
+                logger.error(f"Trim post failed: {e}")
+                # Fallback: thumbnail try karo
                 first_vid = full_videos[0]
                 thumb_id = first_vid.get('thumb_id')
                 if thumb_id:
-                    try:
-                        await context.bot.send_photo(
-                            chat_id=FREE_CH,
-                            photo=thumb_id,
-                            caption=caption,
-                            parse_mode='HTML',
-                            reply_markup=post_keyboard
-                        )
-                    except Exception as e2:
-                        logger.error(f"Fallback photo failed: {e2}")
-                else:
-                    # Last resort: text message with button
-                    try:
+                    sent = await send_thumbnail_as_photo(
+                        context, FREE_CH, thumb_id, caption, post_keyboard
+                    )
+                    if not sent:
+                        # Last resort: text message
                         await context.bot.send_message(
                             chat_id=FREE_CH,
-                            text=caption + "\n\n(Preview unavailable)",
+                            text=caption,
                             parse_mode='HTML',
                             reply_markup=post_keyboard
                         )
-                    except Exception as e3:
-                        logger.error(f"Fallback text failed: {e3}")
+                else:
+                    await context.bot.send_message(
+                        chat_id=FREE_CH,
+                        text=caption,
+                        parse_mode='HTML',
+                        reply_markup=post_keyboard
+                    )
         else:
+            # Trim skip hai, to first video ka thumbnail bhejo
             first_vid = full_videos[0]
             thumb_id = first_vid.get('thumb_id')
             if thumb_id:
-                try:
-                    await context.bot.send_photo(
-                        chat_id=FREE_CH,
-                        photo=thumb_id,
-                        caption=caption,
-                        parse_mode='HTML',
+                sent = await send_thumbnail_as_photo(
+                    context, FREE_CH, thumb_id, caption, post_keyboard
+                )
+                if not sent:
+                    # Fallback to copy message (full video, but better than nothing)
+                    await context.bot.copy_message(
+                        chat_id=FREE_CH, 
+                        from_chat_id=first_vid['chat_id'],
+                        message_id=first_vid['msg_id'], 
+                        caption=caption, 
+                        parse_mode='HTML', 
                         reply_markup=post_keyboard
                     )
-                except Exception as e:
-                    logger.error(f"Photo post failed: {e}")
-                    # fallback to copy first video (but that gives full video)
-                    try:
-                        await context.bot.copy_message(
-                            chat_id=FREE_CH, 
-                            from_chat_id=first_vid['chat_id'],
-                            message_id=first_vid['msg_id'], 
-                            caption=caption, 
-                            parse_mode='HTML', 
-                            reply_markup=post_keyboard
-                        )
-                    except Exception as e2:
-                        logger.error(f"Fallback copy failed: {e2}")
             else:
-                # no thumbnail, send text
-                try:
-                    await context.bot.send_message(
-                        chat_id=FREE_CH,
-                        text=caption + "\n\n(Click below to watch)",
-                        parse_mode='HTML',
-                        reply_markup=post_keyboard
-                    )
-                except Exception as e:
-                    logger.error(f"Text fallback failed: {e}")
+                # No thumbnail, send text
+                await context.bot.send_message(
+                    chat_id=FREE_CH,
+                    text=caption,
+                    parse_mode='HTML',
+                    reply_markup=post_keyboard
+                )
 
     q_str = ", ".join([f"{q['label']}({q['size']})" for q in qualities_info])
     fail_str = f"\n⚠️ Failed: {', '.join(failed_qualities)}" if failed_qualities else ""
@@ -1049,41 +1062,29 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
 
         caption = build_free_channel_caption(title, qualities_info)
 
-        # 👇 Free channel post with thumbnail
+        # 👇 Free channel post with thumbnail as photo
         if FREE_CH != 0:
             first_vid = video_list[0]
             thumb_id = first_vid.get('thumb_id')
             if thumb_id:
-                try:
-                    await context.bot.send_photo(
-                        chat_id=FREE_CH,
-                        photo=thumb_id,
-                        caption=caption,
-                        parse_mode='HTML',
-                        reply_markup=post_keyboard
-                    )
-                except Exception as e:
-                    logger.error(f"Bulk photo post failed: {e}")
+                sent = await send_thumbnail_as_photo(
+                    context, FREE_CH, thumb_id, caption, post_keyboard
+                )
+                if not sent:
                     # fallback to text
-                    try:
-                        await context.bot.send_message(
-                            chat_id=FREE_CH,
-                            text=caption,
-                            parse_mode='HTML',
-                            reply_markup=post_keyboard
-                        )
-                    except Exception as e2:
-                        logger.error(f"Bulk text fallback failed: {e2}")
-            else:
-                try:
                     await context.bot.send_message(
                         chat_id=FREE_CH,
                         text=caption,
                         parse_mode='HTML',
                         reply_markup=post_keyboard
                     )
-                except Exception as e:
-                    logger.error(f"Bulk text fallback failed: {e}")
+            else:
+                await context.bot.send_message(
+                    chat_id=FREE_CH,
+                    text=caption,
+                    parse_mode='HTML',
+                    reply_markup=post_keyboard
+                )
 
         q_str = ", ".join([f"{q['label']}({q['size']})" for q in qualities_info])
         results.append(f"✅ {generate_display_title(title)}: {q_str}")
