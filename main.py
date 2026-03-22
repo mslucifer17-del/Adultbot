@@ -301,21 +301,25 @@ def generate_upi_qr(user_id, user_name, amount):
     return bio, note
 
 def build_free_channel_caption(title, qualities_info):
-    safe_title = html_escape(title)
+    # Skip title if it's a generic placeholder
+    skip_title = title in ("Exclusive Premium Content",) or title.startswith("Untitled Video")
+    
     quality_text = " | ".join([q['label'] for q in qualities_info]) if qualities_info else "HD Quality"
     
-    return (
-        f"🎬 <b>{safe_title}</b>\n\n"
-        f"🔞 <b>18+ Exclusive Premium Content</b>\n\n"
-        f"📊 <b>Available Qualities:</b> {quality_text}\n\n"
-        f"👇 <b>Watch Full Video & Download Below</b> 👇\n"
-    )
-
-def build_backup_caption(title, quality_label=""):
-    safe_title = html_escape(title)
-    if quality_label:
-        return f"🔒 {safe_title} [{quality_label}]"
-    return f"🔒 {safe_title}"
+    if skip_title:
+        return (
+            f"🔞 <b>18+ Exclusive Premium Content</b>\n\n"
+            f"📊 <b>Available Qualities:</b> {quality_text}\n\n"
+            f"👇 <b>Watch Full Video & Download Below</b> 👇\n"
+        )
+    else:
+        safe_title = html_escape(title)
+        return (
+            f"🎬 <b>{safe_title}</b>\n\n"
+            f"🔞 <b>18+ Exclusive Premium Content</b>\n\n"
+            f"📊 <b>Available Qualities:</b> {quality_text}\n\n"
+            f"👇 <b>Watch Full Video & Download Below</b> 👇\n"
+        )
 
 async def schedule_delete(context, chat_id, message_id, delay=120):
     try:
