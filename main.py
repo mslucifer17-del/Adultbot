@@ -66,7 +66,7 @@ AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "300"))
 TEXT_DELETE_TIME = int(os.environ.get("TEXT_DELETE_TIME", "120"))
 QR_DELETE_TIME = int(os.environ.get("QR_DELETE_TIME", "600"))
 UPI_ID = os.environ.get("UPI_ID", "tumhara@upi")
-FREE_CHANNEL_LINK = os.environ.get("FREE_CHANNEL_LINK", "https://t.me/+wcYoTQhIz-ZmOTY1")   # Updated link
+FREE_CHANNEL_LINK = os.environ.get("FREE_CHANNEL_LINK", "https://t.me/+wcYoTQhIz-ZmOTY1")
 SUBSCRIPTION_AMOUNT = os.environ.get("SUBSCRIPTION_AMOUNT", "10")
 
 WAIT_TRIM, WAIT_FULL = range(2)
@@ -300,6 +300,12 @@ def generate_upi_qr(user_id, user_name, amount):
     bio.name = f"qr_{user_id}.png"
     return bio, note
 
+def build_backup_caption(title, quality_label=""):
+    safe_title = html_escape(title)
+    if quality_label:
+        return f"🔒 {safe_title} [{quality_label}]"
+    return f"🔒 {safe_title}"
+
 def build_free_channel_caption(title, qualities_info):
     # Skip title if it's a generic placeholder
     skip_title = title in ("Exclusive Premium Content",) or title.startswith("Untitled Video")
@@ -439,7 +445,7 @@ async def send_thumbnail_as_photo(context, chat_id, thumb_id, caption, reply_mar
             caption=caption,
             parse_mode='HTML',
             reply_markup=reply_markup,
-            has_spoiler=has_spoiler   # 👈 spoiler support
+            has_spoiler=has_spoiler
         )
         logger.info(f"Thumbnail successfully sent as photo to {chat_id} (spoiler={has_spoiler})")
         return msg
@@ -780,7 +786,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         caption = build_free_channel_caption(title, qualities_info)
 
-    # Free channel posting
     if FREE_CH != 0:
         if trim_type != 'skip' and trim_chat_id and trim_msg_id:
             try:
@@ -1086,7 +1091,6 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
 
         caption = build_free_channel_caption(title, qualities_info)
 
-        # Free channel posting
         if FREE_CH != 0:
             first_vid = video_list[0]
             thumb_id = first_vid.get('thumb_id')
