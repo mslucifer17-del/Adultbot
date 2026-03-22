@@ -66,7 +66,7 @@ AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "300"))
 TEXT_DELETE_TIME = int(os.environ.get("TEXT_DELETE_TIME", "120"))
 QR_DELETE_TIME = int(os.environ.get("QR_DELETE_TIME", "600"))
 UPI_ID = os.environ.get("UPI_ID", "tumhara@upi")
-FREE_CHANNEL_LINK = os.environ.get("FREE_CHANNEL_LINK", "https://t.me/your_free_channel")
+FREE_CHANNEL_LINK = os.environ.get("FREE_CHANNEL_LINK", "https://t.me/+wcYoTQhIz-ZmOTY1")   # Updated link
 SUBSCRIPTION_AMOUNT = os.environ.get("SUBSCRIPTION_AMOUNT", "10")
 
 WAIT_TRIM, WAIT_FULL = range(2)
@@ -417,7 +417,7 @@ def run_flask():
         logger.error(f"Flask error: {e}")
 
 # ================= NEW HELPER FOR THUMBNAIL AS PHOTO =================
-async def send_thumbnail_as_photo(context, chat_id, thumb_id, caption, reply_markup=None):
+async def send_thumbnail_as_photo(context, chat_id, thumb_id, caption, reply_markup=None, has_spoiler=False):
     """
     Thumbnail file_id ko download karke photo ki tarah bhejta hai.
     Returns: sent message object ya None agar fail ho jaye.
@@ -434,9 +434,10 @@ async def send_thumbnail_as_photo(context, chat_id, thumb_id, caption, reply_mar
             photo=photo_file,
             caption=caption,
             parse_mode='HTML',
-            reply_markup=reply_markup
+            reply_markup=reply_markup,
+            has_spoiler=has_spoiler   # 👈 spoiler support
         )
-        logger.info(f"Thumbnail successfully sent as photo to {chat_id}")
+        logger.info(f"Thumbnail successfully sent as photo to {chat_id} (spoiler={has_spoiler})")
         return msg
     except Exception as e:
         logger.error(f"Failed to send thumbnail as photo: {e}")
@@ -462,12 +463,12 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 <b>Admin Bot Ready!</b>\n\n"
         "📌 <b>Commands:</b>\n"
         "  /post - Single video post\n"
-        "  /bulk - Bulk upload multiple videos\n"
+        "  /bulk - Bulk upload multiple videos (with caption grouping)\n"
         "  /cancel - Cancel current operation\n"
         "  /start - Reset everything\n\n"
         f"📦 Backup Channel: {backup_status}\n"
         "⚡ <b>File URL Mode Active</b>\n"
-        "📊 <b>Duplicate check: File Size based</b>\n\n"
+        "📊 <b>Bulk Mode:</b> Caption -> Group | No caption -> Separate\n\n"
         "🎬 Shuru karne ke liye /post ya /bulk use karo!",
         parse_mode='HTML'
     )
@@ -622,7 +623,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     if video_obj:
         duration = video_obj.duration or 0
 
-    # 👇 Thumbnail store karo
     thumb_id = None
     if video_obj and video_obj.thumbnail:
         thumb_id = video_obj.thumbnail.file_id
@@ -650,7 +650,7 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
         'duration': duration,
         'chat_id': msg.chat_id,
         'msg_id': msg.message_id,
-        'thumb_id': thumb_id   # 👈 Thumbnail ID yahan store kiya
+        'thumb_id': thumb_id
     }
     full_videos.append(video_data)
     context.user_data['full_videos'] = full_videos
@@ -757,7 +757,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
-    # 👇 Buy VIP button deep link
     bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
     buy_link = f"https://t.me/{bot_username}?start=buy"
     
@@ -777,31 +776,29 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         caption = build_free_channel_caption(title, qualities_info)
 
-    # 👇 Free channel par post (thumbnail as photo)
+    # Free channel posting
     if FREE_CH != 0:
         if trim_type != 'skip' and trim_chat_id and trim_msg_id:
-            # Trim wali post karo
             try:
                 await context.bot.copy_message(
-                    chat_id=FREE_CH, 
+                    chat_id=FREE_CH,
                     from_chat_id=trim_chat_id,
-                    message_id=trim_msg_id, 
-                    caption=caption, 
-                    parse_mode='HTML', 
+                    message_id=trim_msg_id,
+                    caption=caption,
+                    parse_mode='HTML',
                     reply_markup=post_keyboard
                 )
                 logger.info(f"Free channel: Posted trim video for {title}")
             except Exception as e:
                 logger.error(f"Trim post failed: {e}")
-                # Fallback: thumbnail try karo
                 first_vid = full_videos[0]
                 thumb_id = first_vid.get('thumb_id')
                 if thumb_id:
                     sent = await send_thumbnail_as_photo(
-                        context, FREE_CH, thumb_id, caption, post_keyboard
+                        context, FREE_CH, thumb_id, caption, post_keyboard,
+                        has_spoiler=True
                     )
                     if not sent:
-                        # Last resort: text message
                         await context.bot.send_message(
                             chat_id=FREE_CH,
                             text=caption,
@@ -816,25 +813,23 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
                         reply_markup=post_keyboard
                     )
         else:
-            # Trim skip hai, to first video ka thumbnail bhejo
             first_vid = full_videos[0]
             thumb_id = first_vid.get('thumb_id')
             if thumb_id:
                 sent = await send_thumbnail_as_photo(
-                    context, FREE_CH, thumb_id, caption, post_keyboard
+                    context, FREE_CH, thumb_id, caption, post_keyboard,
+                    has_spoiler=True
                 )
                 if not sent:
-                    # Fallback to copy message (full video, but better than nothing)
                     await context.bot.copy_message(
-                        chat_id=FREE_CH, 
+                        chat_id=FREE_CH,
                         from_chat_id=first_vid['chat_id'],
-                        message_id=first_vid['msg_id'], 
-                        caption=caption, 
-                        parse_mode='HTML', 
+                        message_id=first_vid['msg_id'],
+                        caption=caption,
+                        parse_mode='HTML',
                         reply_markup=post_keyboard
                     )
             else:
-                # No thumbnail, send text
                 await context.bot.send_message(
                     chat_id=FREE_CH,
                     text=caption,
@@ -856,7 +851,7 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data.clear()
     return ConversationHandler.END
 
-# ========== BULK UPLOAD ==========
+# ========== BULK UPLOAD (UPDATED WITH CAPTION GROUPING LOGIC) ==========
 
 async def start_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -868,12 +863,13 @@ async def start_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     context.user_data.clear()
-    context.user_data['bulk_videos'] = {}
+    context.user_data['bulk_videos'] = {}          # title -> list of video_data
+    context.user_data['no_caption_counter'] = 0    # counter for untitled videos
     await update.message.reply_text(
-        "📦 <b>BULK UPLOAD MODE</b>\n\n"
-        "📹 Videos bhejte jao.\n"
-        "📝 Caption = Title (auto-cleaned)\n"
-        "📊 Same title = multiple qualities\n\n"
+        "📦 <b>BULK UPLOAD MODE (with caption grouping)</b>\n\n"
+        "📹 Videos / Documents bhejte jao (forwarded ya direct).\n"
+        "📝 <b>Caption present?</b> → Grouped by caption (multiple qualities)\n"
+        "📝 <b>No caption?</b> → Each file becomes a separate video\n\n"
         "✅ Sab bhejo, phir <code>/done</code>\n"
         "❌ Cancel: /cancel",
         parse_mode='HTML'
@@ -903,7 +899,30 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return BULK_WAIT_VIDEO
 
     raw_caption = msg.caption if msg.caption else ""
-    title = clean_title(raw_caption)
+    # Determine title based on caption presence
+    if raw_caption.strip():
+        # Has caption: clean it and use as title
+        title = clean_title(raw_caption)
+    else:
+        # No caption: generate a unique title
+        context.user_data['no_caption_counter'] += 1
+        counter = context.user_data['no_caption_counter']
+        # Try to extract filename if available
+        filename = None
+        if msg.document and msg.document.file_name:
+            filename = msg.document.file_name
+        elif msg.video and msg.video.file_name:
+            filename = msg.video.file_name
+        if filename:
+            # Use filename without extension as title
+            base = os.path.splitext(filename)[0]
+            title = clean_title(base)
+            if title == "Exclusive Premium Content":
+                title = f"Untitled Video #{counter}"
+        else:
+            title = f"Untitled Video #{counter}"
+        logger.info(f"No caption, generated title: {title}")
+
     video_obj = msg.video
     doc_obj = msg.document
     duration = 0
@@ -923,10 +942,11 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if title not in bulk_videos:
         bulk_videos[title] = []
 
+    # Duplicate check by file size
     for existing in bulk_videos[title]:
         if existing['file_size'] == file_size and file_size > 0:
             await msg.reply_text(
-                f"⚠️ Duplicate in '<b>{generate_display_title(title)}</b>': {quality_label} = {format_file_size(file_size)}",
+                f"⚠️ Duplicate in '<b>{html_escape(generate_display_title(title))}</b>': {quality_label} = {format_file_size(file_size)}",
                 parse_mode='HTML'
             )
             return BULK_WAIT_VIDEO
@@ -947,7 +967,7 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
     total_titles = len(bulk_videos)
     total_files = sum(len(v) for v in bulk_videos.values())
     await msg.reply_text(
-        f"✅ Added: <b>{generate_display_title(title)}</b> [{quality_label} - {format_file_size(file_size)}]\n\n"
+        f"✅ Added: <b>{html_escape(generate_display_title(title))}</b> [{quality_label} - {format_file_size(file_size)}]\n\n"
         f"📊 Total: {total_titles} titles, {total_files} files\n\n"
         f"📹 Aur bhejo ya <code>/done</code>",
         parse_mode='HTML'
@@ -1062,16 +1082,16 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
 
         caption = build_free_channel_caption(title, qualities_info)
 
-        # 👇 Free channel post with thumbnail as photo
+        # Free channel posting
         if FREE_CH != 0:
             first_vid = video_list[0]
             thumb_id = first_vid.get('thumb_id')
             if thumb_id:
                 sent = await send_thumbnail_as_photo(
-                    context, FREE_CH, thumb_id, caption, post_keyboard
+                    context, FREE_CH, thumb_id, caption, post_keyboard,
+                    has_spoiler=True
                 )
                 if not sent:
-                    # fallback to text
                     await context.bot.send_message(
                         chat_id=FREE_CH,
                         text=caption,
@@ -1106,7 +1126,7 @@ async def cancel_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ================================================================
-#            PROVIDER BOT (USER-FACING)
+#            PROVIDER BOT (USER-FACING) - UNCHANGED
 # ================================================================
 
 async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1122,9 +1142,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Provider /start from user {user.id} ({user_name}): {text}")
 
-    # 👇 Handle buy parameter
     if text and "buy" in text:
-        # Directly trigger buy flow
         await provider_handle_buy(update, context)
         return
 
@@ -1253,7 +1271,6 @@ async def provider_handle_buy(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = update.effective_user
     user_name = user.first_name
 
-    # Check if already subscribed
     is_active, end_date = check_active_subscription(user.id)
     if is_active and end_date:
         remaining = (end_date - datetime.now()).days
@@ -1954,6 +1971,7 @@ async def run_bots():
         print(f"🕒 QR Auto-Delete: {QR_DELETE_TIME}s")
         print(f"📱 QR Code: {'Available' if QR_AVAILABLE else 'Text Fallback'}")
         print(f"💰 Subscription: ₹{SUBSCRIPTION_AMOUNT}/month")
+        print(f"🆓 Free Channel Link: {FREE_CHANNEL_LINK}")
         print("=" * 60)
 
         print("\n🔄 Starting background tasks...")
