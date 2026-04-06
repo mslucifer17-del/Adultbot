@@ -484,11 +484,12 @@ def watch_video(vid_id):
 
 
 def run_flask():
+    """Starts the Flask web server on the port provided by Render."""
     port = int(os.environ.get('PORT', 8080))
-    try:
-        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-    except Exception as e:
-        logger.error(f"Flask error: {e}")
+    # Use a production-ready server (Flask's built-in is fine for simple redirects)
+    # Important: bind to 0.0.0.0 and use the exact PORT
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False, threaded=True)
+    logger.info(f"🌐 Flask server running on port {port}")
 
 
 # ================= PHOTO SEND HELPERS =================
@@ -2346,13 +2347,13 @@ if __name__ == '__main__':
         exit(1)
 
     print("\n🌐 Starting web server...")
-    try:
-        flask_thread = Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        print(f"✅ Web server started on port {os.environ.get('PORT', 8080)}")
-    except Exception as e:
-        print(f"❌ FLASK ERROR: {e}")
-        exit(1)
+    # Start Flask in a non-daemon thread so it binds properly
+    flask_thread = Thread(target=run_flask, daemon=False)
+    flask_thread.start()
+    # Give the web server a moment to start
+    import time
+    time.sleep(2)
+    print(f"✅ Web server started on port {os.environ.get('PORT', 8080)}")
 
     print("\n" + "=" * 60)
     print("🚀 LAUNCHING TELEGRAM BOTS")
