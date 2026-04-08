@@ -1132,6 +1132,7 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     fail_str = f"\n⚠️ Failed: {', '.join(failed_qualities)}" if failed_qualities else ""
 
     post_type_msg = "📸 Photo/Preview" if trim_type != 'skip' else "📹 Thumbnail/Text"
+    
     await status.edit_text(
         f"✅ <b>SUCCESS!</b>\n\n"
         f"📝 {generate_display_title(title)}\n"
@@ -1140,6 +1141,7 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         f"{post_type_msg} posted in free channel ✅",
         parse_mode='HTML'
     )
+    
     context.user_data.clear()
     return ConversationHandler.END
 
