@@ -1145,64 +1145,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data.clear()
     return ConversationHandler.END
 
-        # ---- ATTEMPT 2: Use first video's thumbnail as photo ----
-        if not posted_successfully:
-            logger.info("Trim not available or failed. Trying thumbnail fallback...")
-            first_vid = full_videos[0]
-            thumb_id = first_vid.get('thumb_id')
-            if thumb_id:
-                result = await send_thumbnail_as_photo(
-                    context, FREE_CH, thumb_id, caption, post_keyboard, has_spoiler=True
-                )
-                if result:
-                    posted_successfully = True
-                    logger.info("✅ Thumbnail photo posted to free channel!")
-
-        # ---- ATTEMPT 3: Text message only (final fallback) ----
-        if not posted_successfully:
-            logger.info("All media attempts failed. Sending text-only post...")
-            try:
-                # For text messages, limit is 4096 chars
-                text_caption = caption if len(caption) <= MESSAGE_TEXT_LIMIT else caption[:MESSAGE_TEXT_LIMIT - 10] + "…"
-                await context.bot.send_message(
-                    chat_id=FREE_CH,
-                    text=text_caption,
-                    parse_mode='HTML',
-                    reply_markup=post_keyboard
-                )
-                posted_successfully = True
-                logger.info("✅ Text-only post sent to free channel (fallback)")
-            except Exception as text_e:
-                logger.error(f"Text fallback also failed: {text_e}")
-                # Last resort: safe generated caption
-                try:
-                    safe_caption = build_free_channel_caption(title, qualities_info)
-                    await context.bot.send_message(
-                        chat_id=FREE_CH,
-                        text=safe_caption,
-                        parse_mode='HTML',
-                        reply_markup=post_keyboard
-                    )
-                    posted_successfully = True
-                    logger.info("✅ Safe caption text post sent to free channel (last resort)")
-                except Exception as last_e:
-                    logger.error(f"❌ All free channel post attempts FAILED: {last_e}")
-
-    q_str = ", ".join([f"{q['label']}({q['size']})" for q in qualities_info])
-    fail_str = f"\n⚠️ Failed: {', '.join(failed_qualities)}" if failed_qualities else ""
-
-    post_type_msg = "📸 Photo/Preview" if trim_type != 'skip' else "📹 Thumbnail/Text"
-    await status.edit_text(
-        f"✅ <b>SUCCESS!</b>\n\n"
-        f"📝 {generate_display_title(title)}\n"
-        f"📊 Qualities: {q_str}{fail_str}\n"
-        f"🔗 Link: {bot_link}\n\n"
-        f"{post_type_msg} posted in free channel ✅",
-        parse_mode='HTML'
-    )
-    context.user_data.clear()
-    return ConversationHandler.END
-
 
 # ========== BULK UPLOAD ==========
 
