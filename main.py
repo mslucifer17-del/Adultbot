@@ -2147,20 +2147,62 @@ async def periodic_cleanup(context):
 async def notify_expired_subs(provider_app_instance: Application):
     await asyncio.sleep(60)
     logger.info("Subscription expiry checker started")
+    
     while True:
-        users_to_notify = []
-        conn = None
-
         try:
             conn = get_db_connection()
             cur = conn.cursor()
+            
+            # Sirf unko dhoondho jinki subscription sach mein expire ho chuki hai
+            # aur jinhe ab tak expired ka notification nahi mila hai
             cur.execute("""
                 SELECT user_id, end_date FROM subscribers
-                WHERE end_date < NOW() + INTERVAL '2 days'
+                WHERE end_date <= NOW()
                 AND end_date > NOW() - INTERVAL '7 days'
                 AND notified = FALSE
             """)
-            users_to_notify = cur.fetchall()
+            expired_users = cur.fetchall()
+
+            for (user_id, end_date) in expired_users:
+                # 1. User ke liye message
+                user_msg = (
+                    "⚠️ <b>VIP Subscription Expired!</b>\n\n"
+                    f"📅 Expired on: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
+                    "🎬 Videos dekhna jaari rakhne ke liye abhi renew karein!\n"
+                    "🔁 Renew: /start → Buy VIP\n"
+                    f"❓ Help: @{ADMIN_USERNAME}"
+                )
+
+                # 2. Admin (Tumhare) liye message
+                admin_msg = (
+                    f"🔔 <b>USER PLAN EXPIRED</b>\n\n"
+                    f"👤 User ID: <code>{user_id}</code>\n"
+                    f"📅 Expired On: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
+                    f"User ka VIP plan khatam ho chuka hai."
+                )
+
+                # User ko bhejo
+                try:
+                    await provider_app_instance.bot.send_message(
+                        chat_id=user_id, text=user_msg, parse_mode='HTML'
+                    )
+                except Exception as e:
+                    logger.error(f"Notify user {user_id} error: {e}")
+
+                # Admin ko bhejo
+                try:
+                    await provider_app_instance.bot.send_message(
+                        chat_id=ADMIN_USER_ID, text=admin_msg, parse_mode='HTML'
+                    )
+                except Exception as e:
+                    logger.error(f"Notify admin error: {e}")
+
+                # Database update kardo taaki dobara message na jaye
+                cur.execute("UPDATE subscribers SET notified = TRUE WHERE user_id = %s", (user_id,))
+                conn.commit()
+
+                await asyncio.sleep(2)
+
             cur.close()
         except Exception as e:
             logger.error(f"Expiry check DB error: {e}")
@@ -2168,47 +2210,8 @@ async def notify_expired_subs(provider_app_instance: Application):
             if conn:
                 db_pool.putconn(conn)
 
-        for (user_id, end_date) in users_to_notify:
-            is_expired = end_date < datetime.now()
-            if is_expired:
-                msg_text = (
-                    "⚠️ <b>Subscription Expired!</b>\n\n"
-                    f"📅 Expired on: {end_date.strftime('%d-%m-%Y')}\n\n"
-                    "🔁 Renew: /start → Buy Subscription\n"
-                    f"❓ Help: @{ADMIN_USERNAME}"
-                )
-            else:
-                remaining = (end_date - datetime.now()).days
-                msg_text = (
-                    "⚠️ <b>Subscription Expiry Alert!</b>\n\n"
-                    f"📅 Expires in <b>{remaining} days</b> ({end_date.strftime('%d-%m-%Y')})\n\n"
-                    "🔁 Renew now: /start → Buy Subscription\n"
-                    f"❓ Help: @{ADMIN_USERNAME}"
-                )
-
-            try:
-                await provider_app_instance.bot.send_message(
-                    chat_id=user_id, text=msg_text, parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.error(f"Notify user {user_id} error: {e}")
-
-            conn2 = None
-            try:
-                conn2 = get_db_connection()
-                cur2 = conn2.cursor()
-                cur2.execute("UPDATE subscribers SET notified = TRUE WHERE user_id = %s", (user_id,))
-                conn2.commit()
-                cur2.close()
-            except Exception as e:
-                logger.error(f"Update notified status error: {e}")
-            finally:
-                if conn2:
-                    db_pool.putconn(conn2)
-
-            await asyncio.sleep(2)
-
-        await asyncio.sleep(43200)
+        # Har 1 ghante (3600 seconds) mein check karega (pehle 12 ghante tha)
+        await asyncio.sleep(3600)
 
 
 # ================================================================
