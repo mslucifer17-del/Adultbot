@@ -990,15 +990,22 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     # 2. POST STICKER & IMAGE TO FILE CHANNELS
     # ==========================================
     file_channels = [ch for ch in [BACKUP_1, BACKUP_2, PAID_CH] if ch != 0]
-    sticker_chat_id = -1003576065127 # Channel ID taken from your link
-    sticker_msg_id = 344            # Message ID taken from your link
+    
+    # Ye wahi channel id hai. Ensure that your Admin Bot is an admin in this channel!
+    sticker_chat_id = -1003576065127 
+    sticker_msg_id = 344
 
     for ch in file_channels:
-        # Step A: Send Sticker first
+        # Step A: Send Sticker first (Safe Mode)
         try:
-            await context.bot.copy_message(chat_id=ch, from_chat_id=sticker_chat_id, message_id=sticker_msg_id)
+            logger.info(f"Attempting to copy sticker from {sticker_chat_id} to {ch}")
+            # Ensure message_id is an integer
+            await context.bot.copy_message(chat_id=ch, from_chat_id=int(sticker_chat_id), message_id=int(sticker_msg_id))
+            logger.info("✅ Sticker copied successfully.")
         except Exception as e:
-            logger.warning(f"Could not copy sticker to {ch}. Is Bot a member of {sticker_chat_id}? Error: {e}")
+            logger.error(f"❌ Failed to copy sticker to {ch}. Make sure bot is Admin in {sticker_chat_id}. Error: {e}")
+            # CRITICAL: We pass instead of returning, so the rest of the post still goes through!
+            pass
 
         # Step B: Send Preview Image with Full Caption
         try:
@@ -1019,7 +1026,7 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
                 else:
                     await context.bot.send_message(chat_id=ch, text=file_channel_caption, parse_mode='HTML')
         except Exception as e:
-            logger.error(f"Failed to post preview to {ch}: {e}")
+            logger.error(f"❌ Failed to post preview to {ch}: {e}")
 
     # ==========================================
     # 3. POST VIDEOS TO FILE CHANNELS (NO CAPTION)
