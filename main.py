@@ -572,7 +572,171 @@ async def send_video_with_caption_safe(context, chat_id, video, caption, reply_m
         logger.error(f"❌ Video send completely failed for {chat_id}: {e2}")
         return None
 
+# ================= IMAGE ENHANCEMENT FUNCTIONS =================
+from PIL import Image, ImageEnhance, ImageFilter
 
+async def enhance_thumbnail(context, thumb_file_id, target_width=1280, target_height=720):
+    """
+    Download thumbnail, enhance quality, and return BytesIO object.
+    
+    Features:
+    - Upscale to HD resolution (1280x720)
+    - Sharpen image
+    - Enhance contrast & brightness
+    - Reduce noise
+    - Optimize for Telegram
+    """
+    try:
+        # Download original thumbnail
+        file = await context.bot.get_file(thumb_file_id)
+        thumb_bytes = await file.download_as_bytearray()
+        
+        # Open with PIL
+        img = Image.open(BytesIO(thumb_bytes))
+        original_format = img.format or 'JPEG'
+        
+        # Convert to RGB if needed (remove alpha channel)
+        if img.mode in ('RGBA', 'LA', 'P'):
+            background = Image.new('RGB', img.size, (0, 0, 0))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+            img = background
+        elif img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Calculate aspect ratio
+        original_width, original_height = img.size
+        aspect_ratio = original_width / original_height
+        target_aspect = target_width / target_height
+        
+        # Smart resize maintaining aspect ratio
+        if aspect_ratio > target_aspect:
+            # Width is limiting factor
+            new_width = target_width
+            new_height = int(target_width / aspect_ratio)
+        else:
+            # Height is limiting factor
+            new_height = target_height
+            new_width = int(target_height * aspect_ratio)
+        
+        # Use LANCZOS for high-quality upscaling
+        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        # Enhancement pipeline
+        
+        # 1. Sharpen (make edges crisp)
+        enhancer = ImageEnhance.Sharpness(img)
+        img = enhancer.enhance(1.5)  # 1.0 = original, >1 = sharper
+        
+        # 2. Enhance contrast
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.2)  # Slight contrast boost
+        
+        # 3. Enhance brightness (if too dark)
+        enhancer = ImageEnhance.Brightness(img)
+        img = enhancer.enhance(1.1)  # Slight brightness boost
+        
+        # 4. Enhance color saturation
+        enhancer = ImageEnhance.Color(img)
+        img = enhancer.enhance(1.15)  # Make colors pop
+        
+        # 5. Apply subtle unsharp mask for extra sharpness
+        img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+        
+        # 6. Reduce noise (optional - smooth out compression artifacts)
+        # img = img.filter(ImageFilter.SMOOTH_MORE)
+        
+        # Save to BytesIO with high quality
+        output = BytesIO()
+        img.save(
+            output, 
+            format='JPEG',
+            quality=95,  # High quality (1-100)
+            optimize=True,  # Optimize file size without losing quality
+            progressive=True  # Progressive JPEG (loads gradually)
+        )
+        output.seek(0)
+        output.name = "enhanced_thumbnail.jpg"
+        
+        logger.info(f"✨ Thumbnail enhanced: {original_width}x{original_height} → {new_width}x{new_height}")
+        return output
+        
+    except Exception as e:
+        logger.error(f"Enhancement failed: {e}")
+        # Fallback: return original
+        try:
+            file = await context.bot.get_file(thumb_file_id)
+            thumb_bytes = await file.download_as_bytearray()
+            fallback = BytesIO(thumb_bytes)
+            fallback.name = "thumbnail.jpg"
+            return fallback
+        except:
+            return None
+
+
+async def create_placeholder_thumbnail(title, width=1280, height=720):
+    """
+    Create a nice-looking placeholder thumbnail if no thumbnail available.
+    """
+    try:
+        from PIL import ImageDraw, ImageFont
+        
+        # Create gradient background
+        img = Image.new('RGB', (width, height), color='#1a1a2e')
+        draw = ImageDraw.Draw(img)
+        
+        # Add gradient effect
+        for i in range(height):
+            shade = int(26 + (i / height) * 30)  # Gradient from dark to lighter
+            draw.rectangle([(0, i), (width, i+1)], fill=f'#{shade:02x}{shade:02x}{shade+10:02x}')
+        
+        # Add title text
+        try:
+            # Try to use a nice font (may not work on all systems)
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 60)
+        except:
+            font = ImageFont.load_default()
+        
+        # Truncate title if too long
+        display_title = title[:40] + "..." if len(title) > 40 else title
+        
+        # Center text
+        text_bbox = draw.textbbox((0, 0), display_title, font=font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+        
+        text_x = (width - text_width) // 2
+        text_y = (height - text_height) // 2
+        
+        # Add shadow
+        draw.text((text_x + 3, text_y + 3), display_title, fill='#000000', font=font)
+        # Add main text
+        draw.text((text_x, text_y), display_title, fill='#ffffff', font=font)
+        
+        # Add watermark
+        watermark = "🔞 Premium Content"
+        try:
+            wm_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
+        except:
+            wm_font = ImageFont.load_default()
+        
+        wm_bbox = draw.textbbox((0, 0), watermark, font=wm_font)
+        wm_width = wm_bbox[2] - wm_bbox[0]
+        draw.text(((width - wm_width) // 2, height - 80), watermark, fill='#e94560', font=wm_font)
+        
+        # Save to BytesIO
+        output = BytesIO()
+        img.save(output, format='JPEG', quality=90)
+        output.seek(0)
+        output.name = "placeholder.jpg"
+        
+        logger.info("✨ Placeholder thumbnail created")
+        return output
+        
+    except Exception as e:
+        logger.error(f"Placeholder creation failed: {e}")
+        return None
 async def send_animation_with_caption_safe(context, chat_id, animation, caption, reply_markup=None):
     safe_caption = truncate_caption_for_photo(caption, PHOTO_CAPTION_LIMIT)
     try:
@@ -632,19 +796,33 @@ async def send_document_with_caption_safe(context, chat_id, document, caption, r
 
 
 async def send_thumbnail_as_photo(context, chat_id, thumb_id, caption, reply_markup=None, has_spoiler=False):
+    """
+    Download thumbnail, ENHANCE IT, and send as photo with safe caption.
+    """
     try:
-        file = await context.bot.get_file(thumb_id)
-        thumb_bytes = await file.download_as_bytearray()
-
-        photo_file = BytesIO(thumb_bytes)
-        photo_file.name = "thumbnail.jpg"
-
-        msg = await send_photo_with_caption_safe(
-            context, chat_id, photo_file, caption, reply_markup, has_spoiler
-        )
-        if msg:
-            logger.info(f"Thumbnail sent as photo to {chat_id} (spoiler={has_spoiler})")
-        return msg
+        # 🎨 ENHANCEMENT ENABLED
+        enhanced_photo = await enhance_thumbnail(context, thumb_id)
+        
+        if enhanced_photo:
+            msg = await send_photo_with_caption_safe(
+                context, chat_id, enhanced_photo, caption, reply_markup, has_spoiler
+            )
+            if msg:
+                logger.info(f"✨ Enhanced thumbnail sent to {chat_id} (spoiler={has_spoiler})")
+            return msg
+        else:
+            # Fallback to original if enhancement fails
+            logger.warning("Enhancement failed, sending original thumbnail")
+            file = await context.bot.get_file(thumb_id)
+            thumb_bytes = await file.download_as_bytearray()
+            photo_file = BytesIO(thumb_bytes)
+            photo_file.name = "thumbnail.jpg"
+            
+            msg = await send_photo_with_caption_safe(
+                context, chat_id, photo_file, caption, reply_markup, has_spoiler
+            )
+            return msg
+            
     except Exception as e:
         logger.error(f"Failed to send thumbnail as photo: {e}")
         return None
@@ -1070,23 +1248,36 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
                 result = await send_document_with_caption_safe(context, FREE_CH, trim_file_id, free_caption, post_keyboard)
                 if result: posted_successfully = True
 
+        # 👇 YAHAN SE SPACING THEEK KI GAYI HAI 👇
         if not posted_successfully:
             thumb_id = full_videos[0].get('thumb_id')
+            
+            # 1. Pehle koshish karo agar thumb_id maujood hai
             if thumb_id:
                 result = await send_thumbnail_as_photo(context, FREE_CH, thumb_id, free_caption, post_keyboard, has_spoiler=True)
-                if result: posted_successfully = True
+                if result:
+                    posted_successfully = True
 
-        if not posted_successfully:
-            try:
-                text_caption = free_caption if len(free_caption) <= MESSAGE_TEXT_LIMIT else free_caption[:MESSAGE_TEXT_LIMIT - 10] + "…"
-                await context.bot.send_message(chat_id=FREE_CH, text=text_caption, parse_mode='HTML', reply_markup=post_keyboard)
-            except Exception as text_e:
-                logger.error(f"Text fallback failed: {text_e}")
-                try:
-                    safe_caption = build_free_channel_caption(title, qualities_info)
-                    await context.bot.send_message(chat_id=FREE_CH, text=safe_caption, parse_mode='HTML', reply_markup=post_keyboard)
-                except Exception as last_e:
-                    pass
+            # 2. Agar thumb_id nahi tha YA upar wala result fail ho gaya, tab placeholder use karo
+            if not posted_successfully:
+                # 🎨 Generate placeholder if no thumbnail or if sending failed
+                placeholder = await create_placeholder_thumbnail(title)
+                if placeholder:
+                    result = await send_photo_with_caption_safe(context, FREE_CH, placeholder, free_caption, post_keyboard, has_spoiler=True)
+                    if result:
+                        posted_successfully = True
+
+                if not posted_successfully:
+                    try:
+                        text_caption = free_caption if len(free_caption) <= MESSAGE_TEXT_LIMIT else free_caption[:MESSAGE_TEXT_LIMIT - 10] + "…"
+                        await context.bot.send_message(chat_id=FREE_CH, text=text_caption, parse_mode='HTML', reply_markup=post_keyboard)
+                    except Exception as text_e:
+                        logger.error(f"Text fallback failed: {text_e}")
+                        try:
+                            safe_caption = build_free_channel_caption(title, qualities_info)
+                            await context.bot.send_message(chat_id=FREE_CH, text=safe_caption, parse_mode='HTML', reply_markup=post_keyboard)
+                        except Exception as last_e:
+                            pass
 
     q_str = ", ".join([f"{q['label']}({q['size']})" for q in qualities_info])
     fail_str = f"\n⚠️ Failed: {', '.join(failed_qualities)}" if failed_qualities else ""
@@ -1245,6 +1436,11 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
     bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
     buy_link = f"https://t.me/{bot_username}?start=buy"
 
+    # Sticker settings
+    sticker_chat_id = -1003576065127
+    sticker_msg_id = 344
+    file_channels = [ch for ch in [BACKUP_1, BACKUP_2, PAID_CH] if ch != 0]
+
     for title, video_list in bulk_videos.items():
         processed += 1
         await status.edit_text(
@@ -1252,6 +1448,9 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode='HTML'
         )
 
+        # ==========================================
+        # DATABASE: Create video entry
+        # ==========================================
         conn = None
         vid_id = None
         try:
@@ -1269,31 +1468,65 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             if conn:
                 db_pool.putconn(conn)
 
+        # ==========================================
+        # BACKUP/PAID CHANNELS: Sticker + Videos (NO PREVIEW, NO CAPTION)
+        # ==========================================
+        for ch in file_channels:
+            # Step 1: Send Sticker (once per video group)
+            try:
+                logger.info(f"Bulk: Copying sticker to {ch} for '{title}'")
+                await context.bot.copy_message(
+                    chat_id=ch, 
+                    from_chat_id=int(sticker_chat_id), 
+                    message_id=int(sticker_msg_id)
+                )
+                logger.info(f"✅ Bulk: Sticker posted to {ch}")
+            except Exception as e:
+                logger.error(f"❌ Bulk: Sticker failed for {ch}: {e}")
+                pass
+
+            # Step 2: Videos will be posted below (no preview here)
+
+        # ==========================================
+        # UPLOAD VIDEOS TO BACKUP CHANNELS (NO CAPTION)
+        # ==========================================
         qualities_info = []
         for vdata in video_list:
             q_label = vdata['quality_label']
-            backup_caption = build_backup_caption(title, q_label)
+            
+            # 👇 EMPTY CAPTION (exactly like single post)
+            backup_caption = ""
 
             file_url = None
+            
+            # Upload to BACKUP_1
             try:
                 copied = await context.bot.copy_message(
-                    chat_id=BACKUP_1, from_chat_id=vdata['chat_id'],
-                    message_id=vdata['msg_id'], caption=backup_caption, parse_mode='HTML'
+                    chat_id=BACKUP_1, 
+                    from_chat_id=vdata['chat_id'],
+                    message_id=vdata['msg_id'], 
+                    caption=backup_caption  # 👈 NO CAPTION
                 )
                 file_url = construct_file_url(BACKUP_1, copied.message_id)
+                logger.info(f"✅ Bulk: {q_label} uploaded to BACKUP_1")
             except Exception as e:
-                logger.error(f"Backup1 FAILED {title} {q_label}: {e}")
+                logger.error(f"❌ Bulk: Backup1 FAILED {title} {q_label}: {e}")
                 continue
 
+            # Copy to other backup/paid channels (no caption)
             for ch_id in [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]:
                 try:
                     await context.bot.copy_message(
-                        chat_id=ch_id, from_chat_id=vdata['chat_id'],
-                        message_id=vdata['msg_id'], caption=backup_caption, parse_mode='HTML'
+                        chat_id=ch_id, 
+                        from_chat_id=vdata['chat_id'],
+                        message_id=vdata['msg_id'], 
+                        caption=backup_caption  # 👈 NO CAPTION
                     )
+                    logger.info(f"✅ Bulk: {q_label} copied to channel {ch_id}")
                 except Exception as e:
-                    logger.error(f"Channel {ch_id} error: {e}")
+                    logger.error(f"❌ Bulk: Channel {ch_id} error: {e}")
 
+            # Save to database
             conn2 = None
             try:
                 conn2 = get_db_connection()
@@ -1308,7 +1541,7 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
                 conn2.commit()
                 cur2.close()
             except Exception as e:
-                logger.error(f"DB quality save error: {e}")
+                logger.error(f"❌ Bulk: DB quality save error: {e}")
             finally:
                 if conn2:
                     db_pool.putconn(conn2)
@@ -1323,11 +1556,15 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             results.append(f"❌ {generate_display_title(title)}: All backups failed!")
             continue
 
+        # ==========================================
+        # FREE CHANNEL: Post with caption + buttons
+        # ==========================================
         bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
         post_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📥 Watch Now / Download 📥", url=bot_link)],
             [InlineKeyboardButton("💎 Buy VIP Subscription", url=buy_link)]
         ])
+        
         caption = build_free_channel_caption(title, qualities_info)
 
         if FREE_CH != 0:
@@ -1341,7 +1578,7 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
                 if result:
                     posted = True
-                    logger.info(f"✅ Bulk: Thumbnail posted for '{title}'")
+                    logger.info(f"✅ Bulk: Thumbnail posted to FREE channel for '{title}'")
 
             if not posted:
                 try:
@@ -1352,9 +1589,9 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
                         parse_mode='HTML',
                         reply_markup=post_keyboard
                     )
-                    logger.info(f"✅ Bulk: Text post for '{title}'")
+                    logger.info(f"✅ Bulk: Text post to FREE channel for '{title}'")
                 except Exception as e:
-                    logger.error(f"Bulk free channel text fallback failed: {e}")
+                    logger.error(f"❌ Bulk: Free channel text failed: {e}")
                     try:
                         safe_caption = make_short_photo_caption(title, qualities_info)
                         await context.bot.send_message(
@@ -1364,10 +1601,12 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
                             reply_markup=post_keyboard
                         )
                     except Exception as last_e:
-                        logger.error(f"Bulk: All free channel attempts failed for '{title}': {last_e}")
+                        logger.error(f"❌ Bulk: All free channel attempts failed: {last_e}")
 
         q_str = ", ".join([f"{q['label']}({q['size']})" for q in qualities_info])
         results.append(f"✅ {generate_display_title(title)}: {q_str}")
+        
+        # Small delay between video groups
         await asyncio.sleep(1)
 
     result_text = "\n".join(results)
