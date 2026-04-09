@@ -10,7 +10,7 @@ from html import escape as html_escape
 from psycopg2 import pool
 from flask import Flask, redirect
 from threading import Thread
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 from io import BytesIO
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -120,6 +120,7 @@ def setup_db():
             )
         """)
 
+        # Updated subscribers table with notification columns
         cur.execute("""
             CREATE TABLE IF NOT EXISTS subscribers (
                 user_id BIGINT PRIMARY KEY,
@@ -127,9 +128,24 @@ def setup_db():
                 first_name TEXT,
                 start_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 end_date TIMESTAMP,
-                notified BOOLEAN DEFAULT FALSE
+                notified BOOLEAN DEFAULT FALSE,
+                expiry_warned BOOLEAN DEFAULT FALSE
             )
         """)
+
+        # Add columns if they don't exist (migration)
+        try:
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'subscribers'
+            """)
+            existing_cols = [row[0] for row in cur.fetchall()]
+            
+            if 'expiry_warned' not in existing_cols:
+                cur.execute("ALTER TABLE subscribers ADD COLUMN expiry_warned BOOLEAN DEFAULT FALSE")
+                logger.info("Added expiry_warned column")
+        except Exception as e:
+            logger.warning(f"Migration check: {e}")
 
         try:
             cur.execute("""
@@ -342,19 +358,12 @@ def build_free_channel_caption(title, qualities_info):
 
 
 def truncate_caption_for_photo(caption_text, max_len=1024):
-    """
-    Telegram photo/video caption limit = 1024 chars.
-    Safely truncate HTML caption without breaking tags.
-    """
     if not caption_text:
         return ""
     if len(caption_text) <= max_len:
         return caption_text
 
-    # Try to cut at a safe point
     truncated = caption_text[:max_len - 20]
-
-    # Close any open HTML tags
     open_b = truncated.count('<b>') - truncated.count('</b>')
     open_i = truncated.count('<i>') - truncated.count('</i>')
     open_code = truncated.count('<code>') - truncated.count('</code>')
@@ -372,9 +381,6 @@ def truncate_caption_for_photo(caption_text, max_len=1024):
 
 
 def make_short_photo_caption(title, qualities_info):
-    """
-    Build a guaranteed-short caption for photos (under 1024 chars).
-    """
     safe_title = html_escape(generate_display_title(title))
     quality_text = " | ".join([q['label'] for q in qualities_info]) if qualities_info else "HD"
     return (
@@ -484,10 +490,7 @@ def watch_video(vid_id):
 
 
 def run_flask():
-    """Starts the Flask web server on the port provided by Render."""
     port = int(os.environ.get('PORT', 8080))
-    # Use a production-ready server (Flask's built-in is fine for simple redirects)
-    # Important: bind to 0.0.0.0 and use the exact PORT
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False, threaded=True)
     logger.info(f"🌐 Flask server running on port {port}")
 
@@ -495,12 +498,6 @@ def run_flask():
 # ================= PHOTO SEND HELPERS =================
 
 async def send_photo_with_caption_safe(context, chat_id, photo, caption, reply_markup=None, has_spoiler=False):
-    """
-    Send photo with caption. If caption too long, truncate.
-    If still fails, retry with minimal caption.
-    Returns the sent message or None.
-    """
-    # Step 1: Try with truncated caption
     safe_caption = truncate_caption_for_photo(caption, PHOTO_CAPTION_LIMIT)
     try:
         msg = await context.bot.send_photo(
@@ -516,7 +513,6 @@ async def send_photo_with_caption_safe(context, chat_id, photo, caption, reply_m
     except Exception as e1:
         logger.warning(f"Photo send attempt 1 failed ({len(safe_caption)} chars): {e1}")
 
-    # Step 2: Try with minimal plain caption (no HTML)
     try:
         minimal_caption = "🔞 Premium Content\n\n👇 Watch & Download Below 👇"
         msg = await context.bot.send_photo(
@@ -531,7 +527,6 @@ async def send_photo_with_caption_safe(context, chat_id, photo, caption, reply_m
     except Exception as e2:
         logger.warning(f"Photo send attempt 2 (minimal) failed: {e2}")
 
-    # Step 3: Try with NO caption at all
     try:
         msg = await context.bot.send_photo(
             chat_id=chat_id,
@@ -547,9 +542,6 @@ async def send_photo_with_caption_safe(context, chat_id, photo, caption, reply_m
 
 
 async def send_video_with_caption_safe(context, chat_id, video, caption, reply_markup=None):
-    """
-    Send video with caption. If caption too long, truncate.
-    """
     safe_caption = truncate_caption_for_photo(caption, PHOTO_CAPTION_LIMIT)
     try:
         msg = await context.bot.send_video(
@@ -582,9 +574,6 @@ async def send_video_with_caption_safe(context, chat_id, video, caption, reply_m
 
 
 async def send_animation_with_caption_safe(context, chat_id, animation, caption, reply_markup=None):
-    """
-    Send animation/GIF with caption. If caption too long, truncate.
-    """
     safe_caption = truncate_caption_for_photo(caption, PHOTO_CAPTION_LIMIT)
     try:
         msg = await context.bot.send_animation(
@@ -614,9 +603,6 @@ async def send_animation_with_caption_safe(context, chat_id, animation, caption,
 
 
 async def send_document_with_caption_safe(context, chat_id, document, caption, reply_markup=None):
-    """
-    Send document with caption. If caption too long, truncate.
-    """
     safe_caption = truncate_caption_for_photo(caption, PHOTO_CAPTION_LIMIT)
     try:
         msg = await context.bot.send_document(
@@ -646,9 +632,6 @@ async def send_document_with_caption_safe(context, chat_id, document, caption, r
 
 
 async def send_thumbnail_as_photo(context, chat_id, thumb_id, caption, reply_markup=None, has_spoiler=False):
-    """
-    Download thumbnail and send as photo with safe caption.
-    """
     try:
         file = await context.bot.get_file(thumb_id)
         thumb_bytes = await file.download_as_bytearray()
@@ -665,6 +648,35 @@ async def send_thumbnail_as_photo(context, chat_id, thumb_id, caption, reply_mar
     except Exception as e:
         logger.error(f"Failed to send thumbnail as photo: {e}")
         return None
+
+
+def clean_free_channel_caption(original_html):
+    if not original_html:
+        return None
+
+    lines = original_html.split('\n')
+    cleaned_lines = []
+
+    for line in lines:
+        lower_line = line.lower()
+        if ('watch & download' in lower_line or 
+            'watch and download' in lower_line or 
+            'how to open' in lower_line or 
+            'ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ' in lower_line):
+            break 
+        
+        cleaned_lines.append(line)
+
+    while cleaned_lines:
+        text_only = re.sub(r'<[^>]+>', '', cleaned_lines[-1])
+        if not re.search(r'[a-zA-Z0-9]', text_only):
+            cleaned_lines.pop()
+        else:
+            break
+
+    caption = '\n'.join(cleaned_lines).strip()
+    
+    return caption if caption else None
 
 
 # ================================================================
@@ -905,43 +917,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     return WAIT_FULL
 
 
-def clean_free_channel_caption(original_html):
-    """
-    Cleans the caption for free channel posts:
-    - Original story aur format ko exactly same rakhega.
-    - 'WATCH & DOWNLOAD' aur 'HOW TO OPEN' wala part pura remove kar dega.
-    - Faltu borders (┏━━┓) bhi hata dega.
-    """
-    if not original_html:
-        return None
-
-    lines = original_html.split('\n')
-    cleaned_lines = []
-
-    for line in lines:
-        lower_line = line.lower()
-        # Jaise hi ye words milenge, aage ka text cut kar denge
-        if ('watch & download' in lower_line or 
-            'watch and download' in lower_line or 
-            'how to open' in lower_line or 
-            'ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ' in lower_line):
-            break 
-        
-        cleaned_lines.append(line)
-
-    # Jo last mein border lines (e.g. ┏━━━━┓) reh jayengi, unhe remove karne ke liye
-    while cleaned_lines:
-        # HTML tags hide karke check karo ki text (alphabets/numbers) bacha hai ya nahi
-        text_only = re.sub(r'<[^>]+>', '', cleaned_lines[-1])
-        if not re.search(r'[a-zA-Z0-9]', text_only):
-            cleaned_lines.pop()
-        else:
-            break
-
-    caption = '\n'.join(cleaned_lines).strip()
-    
-    return caption if caption else None
-
 async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     full_videos = context.user_data.get('full_videos', [])
@@ -969,13 +944,9 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         if conn:
             db_pool.putconn(conn)
 
-    # Pre-calculate qualities info for the caption
     qualities_info = [{'label': v['quality_label'], 'size': format_file_size(v['file_size']), 'url': None} for v in full_videos]
     original_html = context.user_data.get('original_html')
 
-    # ==========================================
-    # 1. CAPTIONS PREPARATION
-    # ==========================================
     if original_html:
         free_caption = clean_free_channel_caption(original_html)
         if not free_caption:
@@ -983,31 +954,22 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         free_caption = build_free_channel_caption(title, qualities_info)
 
-    # Paid/Backup channel caption - Free caption + extra text
     file_channel_caption = f"{free_caption}\n\n👇 <b>Full Videos in All Qualities Below</b> 👇"
 
-    # ==========================================
-    # 2. POST STICKER & IMAGE TO FILE CHANNELS
-    # ==========================================
     file_channels = [ch for ch in [BACKUP_1, BACKUP_2, PAID_CH] if ch != 0]
     
-    # Ye wahi channel id hai. Ensure that your Admin Bot is an admin in this channel!
     sticker_chat_id = -1003576065127 
     sticker_msg_id = 344
 
     for ch in file_channels:
-        # Step A: Send Sticker first (Safe Mode)
         try:
             logger.info(f"Attempting to copy sticker from {sticker_chat_id} to {ch}")
-            # Ensure message_id is an integer
             await context.bot.copy_message(chat_id=ch, from_chat_id=int(sticker_chat_id), message_id=int(sticker_msg_id))
             logger.info("✅ Sticker copied successfully.")
         except Exception as e:
-            logger.error(f"❌ Failed to copy sticker to {ch}. Make sure bot is Admin in {sticker_chat_id}. Error: {e}")
-            # CRITICAL: We pass instead of returning, so the rest of the post still goes through!
+            logger.error(f"❌ Failed to copy sticker to {ch}: {e}")
             pass
 
-        # Step B: Send Preview Image with Full Caption
         try:
             if trim_type != 'skip' and trim_file_id:
                 if trim_type == 'photo':
@@ -1019,7 +981,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
                 elif trim_type == 'document':
                     await send_document_with_caption_safe(context, ch, trim_file_id, file_channel_caption)
             else:
-                # Fallback to thumbnail if preview was skipped
                 thumb_id = full_videos[0].get('thumb_id')
                 if thumb_id:
                     await send_thumbnail_as_photo(context, ch, thumb_id, file_channel_caption)
@@ -1028,9 +989,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"❌ Failed to post preview to {ch}: {e}")
 
-    # ==========================================
-    # 3. POST VIDEOS TO FILE CHANNELS (NO CAPTION)
-    # ==========================================
     failed_qualities = []
 
     for idx, vdata in enumerate(full_videos):
@@ -1039,7 +997,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         src_msg_id = vdata['msg_id']
         await status.edit_text(f"⏳ Uploading {idx + 1}/{total}: {q_label}...")
 
-        # 👇 IMPORTANT: EMPTY CAPTION FOR VIDEOS 👇
         backup_caption = ""
 
         file_url = None
@@ -1063,7 +1020,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
             except:
                 pass
 
-        # Save to DB
         conn2 = None
         try:
             conn2 = get_db_connection()
@@ -1088,9 +1044,6 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.clear()
         return ConversationHandler.END
 
-    # ==========================================
-    # 4. POST TO FREE CHANNEL
-    # ==========================================
     bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
     bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
     buy_link = f"https://t.me/{bot_username}?start=buy"
@@ -1375,12 +1328,8 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("📥 Watch Now / Download 📥", url=bot_link)],
             [InlineKeyboardButton("💎 Buy VIP Subscription", url=buy_link)]
         ])
-        # For bulk upload, we don't have original_html, so use a clean simple caption
         caption = build_free_channel_caption(title, qualities_info)
 
-        # ==========================================
-        # POST TO FREE CHANNEL (BULK) WITH THUMBNAIL
-        # ==========================================
         if FREE_CH != 0:
             posted = False
             first_vid = video_list[0]
@@ -1504,7 +1453,6 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             selection_msg = await update.message.reply_text(
                 f"👋 Hello <b>{html_escape(user_name)}</b>!\n\n"
                 f"🎬 <b>{html_escape(title)}</b>\n\n"
-                f"⏳ Sabhi qualities automatic bheji ja rahi hain...\n\n"
                 f"⚠️ Videos auto-delete after 5 minutes!\n"
                 f"💾 Forward to Saved Messages immediately!",
                 parse_mode='HTML'
@@ -1778,10 +1726,10 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
             conn = get_db_connection()
             cur = conn.cursor()
             cur.execute("""
-                INSERT INTO subscribers (user_id, end_date, notified)
-                VALUES (%s, %s, FALSE)
+                INSERT INTO subscribers (user_id, end_date, notified, expiry_warned)
+                VALUES (%s, %s, FALSE, FALSE)
                 ON CONFLICT (user_id)
-                DO UPDATE SET end_date = %s, notified = FALSE, start_date = CURRENT_TIMESTAMP
+                DO UPDATE SET end_date = %s, notified = FALSE, expiry_warned = FALSE, start_date = CURRENT_TIMESTAMP
             """, (target_user_id, end_date, end_date))
             conn.commit()
             cur.close()
@@ -2093,74 +2041,196 @@ async def periodic_cleanup(context):
                 db_pool.putconn(conn)
 
 
-async def notify_expired_subs(provider_app_instance: Application):
-    await asyncio.sleep(60)
-    logger.info("Subscription expiry checker started")
+# ================================================================
+#   🚨 SUBSCRIPTION EXPIRY NOTIFICATION SYSTEM 🚨
+# ================================================================
+
+async def check_expiring_soon(provider_app_instance: Application):
+    """
+    Check for subscriptions expiring in 1 day and send warnings.
+    Runs daily at scheduled time.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Find users whose subscription ends in next 24 hours and haven't been warned
+        cur.execute("""
+            SELECT user_id, end_date FROM subscribers
+            WHERE end_date > NOW()
+            AND end_date <= NOW() + INTERVAL '24 hours'
+            AND expiry_warned = FALSE
+        """)
+        expiring_users = cur.fetchall()
+
+        for (user_id, end_date) in expiring_users:
+            hours_left = int((end_date - datetime.now()).total_seconds() / 3600)
+            
+            # User ko warning bhejo
+            user_msg = (
+                "⚠️ <b>Subscription Expiring Soon!</b>\n\n"
+                f"📅 Expires: {end_date.strftime('%d-%m-%Y %H:%M')}\n"
+                f"⏰ Time Left: ~{hours_left} hours\n\n"
+                "🔁 Renew karne ke liye:\n"
+                "/start → Buy VIP\n\n"
+                f"❓ Help: @{ADMIN_USERNAME}"
+            )
+            
+            try:
+                await provider_app_instance.bot.send_message(
+                    chat_id=user_id, text=user_msg, parse_mode='HTML'
+                )
+                logger.info(f"Expiry warning sent to {user_id}")
+            except Exception as e:
+                logger.error(f"Failed to warn user {user_id}: {e}")
+            
+            # Admin ko bhi batao
+            admin_msg = (
+                f"⚠️ <b>USER PLAN EXPIRING SOON</b>\n\n"
+                f"👤 User ID: <code>{user_id}</code>\n"
+                f"📅 Expiry: {end_date.strftime('%d-%m-%Y %H:%M')}\n"
+                f"⏰ Hours Left: ~{hours_left}\n"
+            )
+            
+            try:
+                await provider_app_instance.bot.send_message(
+                    chat_id=ADMIN_USER_ID, text=admin_msg, parse_mode='HTML'
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify admin about {user_id}: {e}")
+            
+            # Mark as warned
+            cur.execute("UPDATE subscribers SET expiry_warned = TRUE WHERE user_id = %s", (user_id,))
+            conn.commit()
+            
+            await asyncio.sleep(2)  # Rate limit protection
+
+        if expiring_users:
+            logger.info(f"✅ Processed {len(expiring_users)} expiring subscriptions")
+        
+        cur.close()
+    except Exception as e:
+        logger.error(f"Expiring check error: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+
+async def check_expired_subscriptions(provider_app_instance: Application):
+    """
+    Check for subscriptions that have expired and send notifications.
+    Runs daily at scheduled time.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Find expired subscriptions that haven't been notified
+        cur.execute("""
+            SELECT user_id, end_date FROM subscribers
+            WHERE end_date <= NOW()
+            AND end_date > NOW() - INTERVAL '7 days'
+            AND notified = FALSE
+        """)
+        expired_users = cur.fetchall()
+
+        for (user_id, end_date) in expired_users:
+            # User ko notification
+            user_msg = (
+                "❌ <b>VIP Subscription Expired!</b>\n\n"
+                f"📅 Expired on: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
+                "🎬 Videos access restore karne ke liye renew karein:\n"
+                "/start → Buy VIP\n\n"
+                f"❓ Help: @{ADMIN_USERNAME}"
+            )
+
+            try:
+                await provider_app_instance.bot.send_message(
+                    chat_id=user_id, text=user_msg, parse_mode='HTML'
+                )
+                logger.info(f"Expiry notification sent to {user_id}")
+            except Exception as e:
+                logger.error(f"Failed to notify user {user_id}: {e}")
+
+            # Admin ko notification
+            admin_msg = (
+                f"🔔 <b>USER PLAN EXPIRED</b>\n\n"
+                f"👤 User ID: <code>{user_id}</code>\n"
+                f"📅 Expired On: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
+                f"User ka VIP plan khatam ho chuka hai."
+            )
+
+            try:
+                await provider_app_instance.bot.send_message(
+                    chat_id=ADMIN_USER_ID, text=admin_msg, parse_mode='HTML'
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify admin: {e}")
+
+            # Mark as notified
+            cur.execute("UPDATE subscribers SET notified = TRUE WHERE user_id = %s", (user_id,))
+            conn.commit()
+
+            await asyncio.sleep(2)  # Rate limit protection
+
+        if expired_users:
+            logger.info(f"✅ Processed {len(expired_users)} expired subscriptions")
+
+        cur.close()
+    except Exception as e:
+        logger.error(f"Expiry check error: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+
+async def schedule_daily_check(provider_app_instance: Application):
+    """
+    Scheduler that runs checks every night at 2:00 AM IST.
+    Checks both expiring (24h before) and expired subscriptions.
+    """
+    await asyncio.sleep(60)  # Initial delay for bot startup
+    logger.info("🕒 Subscription checker started - will run daily at 2:00 AM IST")
     
     while True:
         try:
-            conn = get_db_connection()
-            cur = conn.cursor()
+            # Get current time in IST (UTC+5:30)
+            from datetime import timezone, timedelta as td
+            ist_tz = timezone(td(hours=5, minutes=30))
+            now_ist = datetime.now(ist_tz)
             
-            # Sirf unko dhoondho jinki subscription sach mein expire ho chuki hai
-            # aur jinhe ab tak expired ka notification nahi mila hai
-            cur.execute("""
-                SELECT user_id, end_date FROM subscribers
-                WHERE end_date <= NOW()
-                AND end_date > NOW() - INTERVAL '7 days'
-                AND notified = FALSE
-            """)
-            expired_users = cur.fetchall()
-
-            for (user_id, end_date) in expired_users:
-                # 1. User ke liye message
-                user_msg = (
-                    "⚠️ <b>VIP Subscription Expired!</b>\n\n"
-                    f"📅 Expired on: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
-                    "🎬 Videos dekhna jaari rakhne ke liye abhi renew karein!\n"
-                    "🔁 Renew: /start → Buy VIP\n"
-                    f"❓ Help: @{ADMIN_USERNAME}"
-                )
-
-                # 2. Admin (Tumhare) liye message
-                admin_msg = (
-                    f"🔔 <b>USER PLAN EXPIRED</b>\n\n"
-                    f"👤 User ID: <code>{user_id}</code>\n"
-                    f"📅 Expired On: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
-                    f"User ka VIP plan khatam ho chuka hai."
-                )
-
-                # User ko bhejo
-                try:
-                    await provider_app_instance.bot.send_message(
-                        chat_id=user_id, text=user_msg, parse_mode='HTML'
-                    )
-                except Exception as e:
-                    logger.error(f"Notify user {user_id} error: {e}")
-
-                # Admin ko bhejo
-                try:
-                    await provider_app_instance.bot.send_message(
-                        chat_id=ADMIN_USER_ID, text=admin_msg, parse_mode='HTML'
-                    )
-                except Exception as e:
-                    logger.error(f"Notify admin error: {e}")
-
-                # Database update kardo taaki dobara message na jaye
-                cur.execute("UPDATE subscribers SET notified = TRUE WHERE user_id = %s", (user_id,))
-                conn.commit()
-
-                await asyncio.sleep(2)
-
-            cur.close()
+            # Target time: 2:00 AM IST
+            target_time = now_ist.replace(hour=2, minute=0, second=0, microsecond=0)
+            
+            # If already past 2 AM today, schedule for tomorrow
+            if now_ist >= target_time:
+                target_time += timedelta(days=1)
+            
+            # Calculate wait time
+            wait_seconds = (target_time - now_ist).total_seconds()
+            
+            logger.info(f"⏰ Next check scheduled at: {target_time.strftime('%d-%m-%Y %H:%M:%S IST')} (in {int(wait_seconds/3600)}h {int((wait_seconds%3600)/60)}m)")
+            
+            # Wait until target time
+            await asyncio.sleep(wait_seconds)
+            
+            # Run both checks
+            logger.info("🔍 Running daily subscription checks...")
+            
+            # Check expiring soon (24h warning)
+            await check_expiring_soon(provider_app_instance)
+            
+            # Check already expired
+            await check_expired_subscriptions(provider_app_instance)
+            
+            logger.info("✅ Daily check completed successfully")
+            
         except Exception as e:
-            logger.error(f"Expiry check DB error: {e}")
-        finally:
-            if conn:
-                db_pool.putconn(conn)
-
-        # Har 1 ghante (3600 seconds) mein check karega (pehle 12 ghante tha)
-        await asyncio.sleep(3600)
+            logger.error(f"Scheduler error: {e}")
+            # On error, wait 1 hour before retry
+            await asyncio.sleep(3600)
 
 
 # ================================================================
@@ -2275,8 +2345,12 @@ async def run_bots():
 
         print("\n🔄 Starting background tasks...")
         asyncio.create_task(periodic_cleanup(None))
-        asyncio.create_task(notify_expired_subs(provider_app))
+        
+        # ✨ NEW: Start daily subscription checker
+        asyncio.create_task(schedule_daily_check(provider_app))
+        
         print("✅ Background tasks started")
+        print("🕒 Subscription checker: Daily at 2:00 AM IST")
 
         print("\n✨ System ready! Waiting for commands...\n")
 
@@ -2338,10 +2412,8 @@ if __name__ == '__main__':
         exit(1)
 
     print("\n🌐 Starting web server...")
-    # Start Flask in a non-daemon thread so it binds properly
     flask_thread = Thread(target=run_flask, daemon=False)
     flask_thread.start()
-    # Give the web server a moment to start
     import time
     time.sleep(2)
     print(f"✅ Web server started on port {os.environ.get('PORT', 8080)}")
