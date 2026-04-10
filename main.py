@@ -878,6 +878,7 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 <b>Commands:</b>\n"
         "  /post - Single video post\n"
         "  /bulk - Bulk upload multiple videos (with caption grouping)\n"
+        "  /test_expiry - Manual expiry check database test\n"
         "  /cancel - Cancel current operation\n"
         "  /start - Reset everything\n\n"
         f"📦 Backup Channel: {backup_status}\n"
@@ -2428,10 +2429,21 @@ async def check_expired_subscriptions(provider_app_instance: Application):
 async def schedule_daily_check(provider_app_instance: Application):
     """
     Scheduler that runs checks every night at 2:00 AM IST.
-    Checks both expiring (24h before) and expired subscriptions.
+    WITH IMPROVED LOGGING & ERROR HANDLING
     """
     await asyncio.sleep(60)  # Initial delay for bot startup
-    logger.info("🕒 Subscription checker started - will run daily at 2:00 AM IST")
+    logger.info("=" * 60)
+    logger.info("🕒 SUBSCRIPTION CHECKER STARTED")
+    logger.info("=" * 60)
+    
+    # Test immediate check on startup (for debugging)
+    logger.info("🧪 Running initial test check...")
+    try:
+        await check_expiring_soon(provider_app_instance)
+        await check_expired_subscriptions(provider_app_instance)
+        logger.info("✅ Initial test check completed")
+    except Exception as e:
+        logger.error(f"❌ Initial test check failed: {e}")
     
     while True:
         try:
@@ -2449,29 +2461,259 @@ async def schedule_daily_check(provider_app_instance: Application):
             
             # Calculate wait time
             wait_seconds = (target_time - now_ist).total_seconds()
+            hours = int(wait_seconds / 3600)
+            minutes = int((wait_seconds % 3600) / 60)
             
-            logger.info(f"⏰ Next check scheduled at: {target_time.strftime('%d-%m-%Y %H:%M:%S IST')} (in {int(wait_seconds/3600)}h {int((wait_seconds%3600)/60)}m)")
+            logger.info("⏰ NEXT CHECK SCHEDULED:")
+            logger.info(f"   Time: {target_time.strftime('%d-%m-%Y %H:%M:%S IST')}")
+            logger.info(f"   Wait: {hours}h {minutes}m ({int(wait_seconds)}s)")
+            logger.info("=" * 60)
             
             # Wait until target time
             await asyncio.sleep(wait_seconds)
             
             # Run both checks
-            logger.info("🔍 Running daily subscription checks...")
+            logger.info("=" * 60)
+            logger.info("🔍 RUNNING DAILY SUBSCRIPTION CHECKS")
+            logger.info(f"   Time: {datetime.now(ist_tz).strftime('%d-%m-%Y %H:%M:%S IST')}")
+            logger.info("=" * 60)
             
             # Check expiring soon (24h warning)
+            logger.info("⚠️ Checking expiring subscriptions...")
             await check_expiring_soon(provider_app_instance)
             
             # Check already expired
+            logger.info("❌ Checking expired subscriptions...")
             await check_expired_subscriptions(provider_app_instance)
             
-            logger.info("✅ Daily check completed successfully")
+            logger.info("=" * 60)
+            logger.info("✅ DAILY CHECK COMPLETED SUCCESSFULLY")
+            logger.info("=" * 60)
             
         except Exception as e:
-            logger.error(f"Scheduler error: {e}")
+            logger.error("=" * 60)
+            logger.error(f"❌ SCHEDULER ERROR: {e}")
+            logger.error("=" * 60)
+            import traceback
+            traceback.print_exc()
             # On error, wait 1 hour before retry
+            logger.info("⏳ Waiting 1 hour before retry...")
             await asyncio.sleep(3600)
 
 
+async def check_expiring_soon(provider_app_instance: Application):
+    """
+    Check for subscriptions expiring in 1 day and send warnings.
+    WITH IMPROVED LOGGING
+    """
+    conn = None
+    count = 0
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT user_id, end_date, first_name FROM subscribers
+            WHERE end_date > NOW()
+            AND end_date <= NOW() + INTERVAL '24 hours'
+            AND expiry_warned = FALSE
+        """)
+        expiring_users = cur.fetchall()
+        
+        logger.info(f"   Found {len(expiring_users)} expiring subscriptions")
+
+        for (user_id, end_date, first_name) in expiring_users:
+            hours_left = int((end_date - datetime.now()).total_seconds() / 3600)
+            
+            # User ko warning
+            user_msg = (
+                "⚠️ <b>Subscription Expiring Soon!</b>\n\n"
+                f"📅 Expires: {end_date.strftime('%d-%m-%Y %H:%M')}\n"
+                f"⏰ Time Left: ~{hours_left} hours\n\n"
+                "🔁 Renew karne ke liye:\n"
+                "/start → Buy VIP\n\n"
+                f"❓ Help: @{ADMIN_USERNAME}"
+            )
+            
+            try:
+                await provider_app_instance.bot.send_message(
+                    chat_id=user_id, text=user_msg, parse_mode='HTML'
+                )
+                logger.info(f"   ✅ Warning sent to user {user_id} ({first_name or 'Unknown'})")
+                count += 1
+            except Exception as e:
+                logger.error(f"   ❌ Failed to warn user {user_id}: {e}")
+            
+            # Admin ko bhi batao
+            admin_msg = (
+                f"⚠️ <b>USER PLAN EXPIRING SOON</b>\n\n"
+                f"👤 User ID: <code>{user_id}</code>\n"
+                f"👤 Name: {first_name or 'Unknown'}\n"
+                f"📅 Expiry: {end_date.strftime('%d-%m-%Y %H:%M')}\n"
+                f"⏰ Hours Left: ~{hours_left}\n"
+            )
+            
+            try:
+                await provider_app_instance.bot.send_message(
+                    chat_id=ADMIN_USER_ID, text=admin_msg, parse_mode='HTML'
+                )
+                logger.info(f"   ✅ Admin notified about user {user_id}")
+            except Exception as e:
+                logger.error(f"   ❌ Failed to notify admin: {e}")
+            
+            # Mark as warned
+            cur.execute("UPDATE subscribers SET expiry_warned = TRUE WHERE user_id = %s", (user_id,))
+            conn.commit()
+            
+            await asyncio.sleep(2)
+
+        if count > 0:
+            logger.info(f"   ✅ Processed {count} expiring subscriptions")
+        else:
+            logger.info(f"   ℹ️ No expiring subscriptions found")
+        
+        cur.close()
+    except Exception as e:
+        logger.error(f"   ❌ Expiring check error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+
+async def check_expired_subscriptions(provider_app_instance: Application):
+    """
+    Check for subscriptions that have expired and send notifications.
+    WITH IMPROVED LOGGING
+    """
+    conn = None
+    count = 0
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT user_id, end_date, first_name FROM subscribers
+            WHERE end_date <= NOW()
+            AND end_date > NOW() - INTERVAL '7 days'
+            AND notified = FALSE
+        """)
+        expired_users = cur.fetchall()
+        
+        logger.info(f"   Found {len(expired_users)} expired subscriptions")
+
+        for (user_id, end_date, first_name) in expired_users:
+            # User ko notification
+            user_msg = (
+                "❌ <b>VIP Subscription Expired!</b>\n\n"
+                f"📅 Expired on: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
+                "🎬 Videos access restore karne ke liye renew karein:\n"
+                "/start → Buy VIP\n\n"
+                f"❓ Help: @{ADMIN_USERNAME}"
+            )
+
+            try:
+                await provider_app_instance.bot.send_message(
+                    chat_id=user_id, text=user_msg, parse_mode='HTML'
+                )
+                logger.info(f"   ✅ Expiry notification sent to user {user_id} ({first_name or 'Unknown'})")
+                count += 1
+            except Exception as e:
+                logger.error(f"   ❌ Failed to notify user {user_id}: {e}")
+
+            # Admin ko notification
+            admin_msg = (
+                f"🔔 <b>USER PLAN EXPIRED</b>\n\n"
+                f"👤 User ID: <code>{user_id}</code>\n"
+                f"👤 Name: {first_name or 'Unknown'}\n"
+                f"📅 Expired On: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
+                f"User ka VIP plan khatam ho chuka hai."
+            )
+
+            try:
+                await provider_app_instance.bot.send_message(
+                    chat_id=ADMIN_USER_ID, text=admin_msg, parse_mode='HTML'
+                )
+                logger.info(f"   ✅ Admin notified about expired user {user_id}")
+            except Exception as e:
+                logger.error(f"   ❌ Failed to notify admin: {e}")
+
+            # Mark as notified
+            cur.execute("UPDATE subscribers SET notified = TRUE WHERE user_id = %s", (user_id,))
+            conn.commit()
+
+            await asyncio.sleep(2)
+
+        if count > 0:
+            logger.info(f"   ✅ Processed {count} expired subscriptions")
+        else:
+            logger.info(f"   ℹ️ No expired subscriptions found")
+
+        cur.close()
+    except Exception as e:
+        logger.error(f"   ❌ Expired check error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+# ============ TESTING COMMAND (ADMIN ONLY) ============
+async def test_expiry_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual trigger for testing expiry notifications"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ Admin only!")
+        return
+    
+    status_msg = await update.message.reply_text("🔍 Running manual expiry check...")
+    
+    # Import the provider app reference (we'll fix this below)
+    # For now, use context directly
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Check expiring soon (24h warning)
+        cur.execute("""
+            SELECT user_id, end_date, expiry_warned FROM subscribers
+            WHERE end_date > NOW()
+            AND end_date <= NOW() + INTERVAL '24 hours'
+        """)
+        expiring = cur.fetchall()
+        
+        # Check already expired
+        cur.execute("""
+            SELECT user_id, end_date, notified FROM subscribers
+            WHERE end_date <= NOW()
+            AND end_date > NOW() - INTERVAL '7 days'
+        """)
+        expired = cur.fetchall()
+        
+        cur.close()
+        
+        result_text = f"📊 <b>Manual Check Results:</b>\n\n"
+        result_text += f"⚠️ <b>Expiring Soon (24h):</b> {len(expiring)}\n"
+        for (uid, edate, warned) in expiring:
+            hours = int((edate - datetime.now()).total_seconds() / 3600)
+            result_text += f"  • User {uid}: {hours}h left (warned={warned})\n"
+        
+        result_text += f"\n❌ <b>Expired:</b> {len(expired)}\n"
+        for (uid, edate, notif) in expired:
+            result_text += f"  • User {uid}: {edate.strftime('%d-%m-%Y')} (notified={notif})\n"
+        
+        if not expiring and not expired:
+            result_text += "\n✅ No subscriptions need notifications right now."
+        
+        await status_msg.edit_text(result_text, parse_mode='HTML')
+        
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Error: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 # ================================================================
 #                   RUN BOTH BOTS
 # ================================================================
@@ -2537,6 +2779,7 @@ async def run_bots():
     )
     main_app.add_handler(bulk_conv)
     main_app.add_handler(CommandHandler('start', admin_start))
+    main_app.add_handler(CommandHandler('check_expiry', test_expiry_check))
     print("✅ Main Bot handlers configured")
 
     # ============ PROVIDER BOT ============
