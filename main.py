@@ -422,20 +422,21 @@ def build_free_channel_caption(title, qualities_info):
     quality_text = " | ".join([q['label'] for q in qualities_info]) if qualities_info else "HD Quality"
 
     if skip_title:
+        # Bina title wali videos ke liye (Fallback)
         return (
-            f"🔞 <b>18+ Exclusive Premium Content</b>\n\n"
-            f"📊 <b>Available Qualities:</b> {quality_text}\n\n"
-            f"👇 <b>Watch Full Video & Download Below</b> 👇\n"
+            f"<blockquote><b>🔞 ᴇxᴄʟᴜsɪᴠᴇ ᴘʀᴇᴍɪᴜᴍ ᴄᴏɴᴛᴇɴᴛ</b></blockquote>\n"
+            f"<blockquote><b>📊 ᴀᴠᴀɪʟᴀʙʟᴇ Qᴜᴀʟɪᴛɪᴇs:</b> {quality_text}</blockquote>\n\n"
+            f"<b>👇 ᴡᴀᴛᴄʜ ғᴜʟʟ ᴠɪᴅᴇᴏ & ᴅᴏᴡɴʟᴏᴀᴅ ʙᴇʟᴏᴡ 👇</b>"
         )
     else:
+        # Title wali videos ke liye
         safe_title = html_escape(title)
         return (
-            f"🎬 <b>{safe_title}</b>\n\n"
-            f"🔞 <b>18+ Exclusive Premium Content</b>\n\n"
-            f"📊 <b>Available Qualities:</b> {quality_text}\n\n"
-            f"👇 <b>Watch Full Video & Download Below</b> 👇\n"
+            f"<blockquote><b>🎬 {safe_title}</b></blockquote>\n"
+            f"<blockquote><b>🔞 ᴇxᴄʟᴜsɪᴠᴇ ᴘʀᴇᴍɪᴜᴍ ᴄᴏɴᴛᴇɴᴛ</b></blockquote>\n"
+            f"<blockquote><b>📊 Qᴜᴀʟɪᴛɪᴇs:</b> {quality_text}</blockquote>\n\n"
+            f"<b>👇 ᴡᴀᴛᴄʜ ғᴜʟʟ ᴠɪᴅᴇᴏ & ᴅᴏᴡɴʟᴏᴀᴅ ʙᴇʟᴏᴡ 👇</b>"
         )
-
 
 def truncate_caption_for_photo(caption_text, max_len=1024):
     if not caption_text:
@@ -930,25 +931,23 @@ def clean_free_channel_caption(original_html):
     for line in lines:
         lower_line = line.lower()
         
-        # 🛑 BREAK CONDITIONS: Inme se kuch bhi dikha toh wahan se cut laga dega
+        # 🛑 BREAK CONDITIONS
         if (
             'watch & download' in lower_line or 
             'watch and download' in lower_line or 
             'how to open' in lower_line or 
             'ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ' in lower_line or
-            '╔══' in line or  # Box ka upper border cut karega
-            '╚══' in line or  # Box ka lower border cut karega
-            '📥' in line and 'watch' in lower_line # Extra safety
+            '╔══' in line or 
+            '╚══' in line or
+            ('📥' in line and 'watch' in lower_line)
         ):
             break 
         
         cleaned_lines.append(line)
 
-    # 🧹 CLEANUP: End mein dangling box lines ya khali emoji wali lines ko saaf karega
+    # 🧹 CLEANUP
     while cleaned_lines:
         text_only = re.sub(r'<[^>]+>', '', cleaned_lines[-1]).strip()
-        
-        # Agar aakhri line mein koi text/number nahi hai (sirf space ya kachra symbol hai) -> Usey delete karo
         if not text_only or not re.search(r'[a-zA-Z0-9]', text_only):
             cleaned_lines.pop()
         else:
@@ -956,7 +955,27 @@ def clean_free_channel_caption(original_html):
 
     caption = '\n'.join(cleaned_lines).strip()
     
-    return caption if caption else None
+    if not caption:
+        return None
+
+    # 🔥 THE MAGIC FIX: Auto-close hanging HTML tags (like <blockquote> for green lines) 🔥
+    tags = re.findall(r'<(/?[a-zA-Z0-9\-]+)[^>]*>', caption)
+    opened = []
+    for tag in tags:
+        if tag.startswith('/'):
+            tag_name = tag[1:]
+            if opened and opened[-1] == tag_name:
+                opened.pop()
+            elif tag_name in opened:
+                opened.remove(tag_name)
+        else:
+            opened.append(tag)
+            
+    # Jo tags open reh gaye, unhe ulte sequence mein close kar do
+    for tag in reversed(opened):
+        caption += f'</{tag}>'
+        
+    return caption
 
 
 # ================================================================
@@ -1503,7 +1522,8 @@ async def process_bulk_video(update: Update, context: ContextTypes.DEFAULT_TYPE)
         'duration': duration,
         'chat_id': msg.chat_id,
         'msg_id': msg.message_id,
-        'thumb_id': thumb_id
+        'thumb_id': thumb_id,
+        'original_html': msg.caption_html
     }
     bulk_videos[title].append(video_data)
     context.user_data['bulk_videos'] = bulk_videos
@@ -1668,7 +1688,24 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             [InlineKeyboardButton("💎 Buy VIP Subscription", url=buy_link)]
         ])
         
-        caption = build_free_channel_caption(title, qualities_info)
+        # 🔥 PREMIUM CAPTION LOGIC 🔥
+        original_html = next((v.get('original_html') for v in video_list if v.get('original_html')), None)
+        
+        if original_html:
+            free_caption = clean_free_channel_caption(original_html)
+            if free_caption:
+                # Agar premium caption mil gaya, toh uske neeche qualities aur link lagao
+                quality_text = " | ".join([q['label'] for q in qualities_info]) if qualities_info else "HD Quality"
+                caption = (
+                    f"{free_caption}\n\n"
+                    f"📊 <b>Available Qualities:</b> {quality_text}\n\n"
+                    f"👇 <b>Watch Full Video & Download Below</b> 👇"
+                )
+            else:
+                caption = build_free_channel_caption(title, qualities_info)
+        else:
+            # Agar koi caption nahi bheja (without caption video thi), toh plain wala use karo
+            caption = build_free_channel_caption(title, qualities_info)
 
         if FREE_CH != 0:
             posted = False
