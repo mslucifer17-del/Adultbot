@@ -210,9 +210,37 @@ def parse_file_url(file_url):
 def clean_title(raw_title):
     if not raw_title:
         return "Exclusive Premium Content"
-    title = raw_title.strip()
-    title = re.sub(r'@\w+', '', title)
-    title = re.sub(r'\d+min\s+from\s+\d+:\d+:\d+\s+of\s+', '', title, flags=re.IGNORECASE)
+        
+    lines = raw_title.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        lower_line = line.lower()
+        # 🛑 BREAK CONDITIONS (Yahan se kachra cut hoga)
+        if (
+            'watch & download' in lower_line or 
+            'watch and download' in lower_line or 
+            'how to open' in lower_line or 
+            'ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ' in lower_line or
+            '╔══' in line or 
+            '╚══' in line or
+            '📥' in line or
+            '𝗪𝗔𝗧𝗖𝗛' in line or
+            '𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗' in line
+        ):
+            break 
+        
+        # Username mentions hata do
+        clean_line = re.sub(r'@\w+', '', line)
+        cleaned_lines.append(clean_line)
+        
+    # Neeche ki khali lines saaf karo
+    while cleaned_lines and not cleaned_lines[-1].strip():
+        cleaned_lines.pop()
+        
+    title = '\n'.join(cleaned_lines).strip()
+    
+    # Purane extensions aur words remove karne ka logic
     title = re.sub(r'\.(mkv|mp4|avi|mov|wmv|flv|webm|m4v)', '', title, flags=re.IGNORECASE)
     unwanted_patterns = [
         r'\b(Seva|HEVC|HDRip|UNRAT|UNRATED|720p|1080p|480p|4K|2160p)\b',
@@ -221,13 +249,13 @@ def clean_title(raw_title):
     ]
     for pattern in unwanted_patterns:
         title = re.sub(pattern, '', title, flags=re.IGNORECASE)
-    title = re.sub(r'\s+', ' ', title)
-    title = re.sub(r'[^\w\s\-\(\)]', '', title)
+        
     title = title.strip()
-    if len(title) < 5:
+    
+    if len(title) < 2:
         return "Exclusive Premium Content"
+        
     return title
-
 
 def generate_display_title(cleaned_title):
     if len(cleaned_title) > 50:
@@ -837,17 +865,27 @@ def clean_free_channel_caption(original_html):
 
     for line in lines:
         lower_line = line.lower()
-        if ('watch & download' in lower_line or 
+        
+        # 🛑 BREAK CONDITIONS: Inme se kuch bhi dikha toh wahan se cut laga dega
+        if (
+            'watch & download' in lower_line or 
             'watch and download' in lower_line or 
             'how to open' in lower_line or 
-            'ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ' in lower_line):
+            'ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ' in lower_line or
+            '╔══' in line or  # Box ka upper border cut karega
+            '╚══' in line or  # Box ka lower border cut karega
+            '📥' in line and 'watch' in lower_line # Extra safety
+        ):
             break 
         
         cleaned_lines.append(line)
 
+    # 🧹 CLEANUP: End mein dangling box lines ya khali emoji wali lines ko saaf karega
     while cleaned_lines:
-        text_only = re.sub(r'<[^>]+>', '', cleaned_lines[-1])
-        if not re.search(r'[a-zA-Z0-9]', text_only):
+        text_only = re.sub(r'<[^>]+>', '', cleaned_lines[-1]).strip()
+        
+        # Agar aakhri line mein koi text/number nahi hai (sirf space ya kachra symbol hai) -> Usey delete karo
+        if not text_only or not re.search(r'[a-zA-Z0-9]', text_only):
             cleaned_lines.pop()
         else:
             break
@@ -1644,6 +1682,28 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Provider /start from user {user.id} ({user_name}): {text}")
 
+    # ==========================================
+    # NEW: Update User Info silently in Database
+    # ==========================================
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO subscribers (user_id, username, first_name)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id) 
+            DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name
+        """, (user.id, user.username, user_name))
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        logger.error(f"Failed to update user info on /start: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+    # ==========================================
+
     if text and "buy" in text:
         await provider_handle_buy(update, context)
         return
@@ -1660,7 +1720,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("SELECT title FROM adult_videos WHERE vid_id = %s", (vid_id,))
                 video_result = cur.fetchone()
                 if video_result:
-                    title = video_result[0]
+                    title = clean_title(video_result[0])
                     cur.execute(
                         """SELECT quality_id, quality_label, file_url, file_size
                            FROM video_qualities WHERE vid_id = %s
@@ -2279,151 +2339,6 @@ async def periodic_cleanup(context):
         finally:
             if conn:
                 db_pool.putconn(conn)
-
-
-# ================================================================
-#   🚨 SUBSCRIPTION EXPIRY NOTIFICATION SYSTEM 🚨
-# ================================================================
-
-async def check_expiring_soon(provider_app_instance: Application):
-    """
-    Check for subscriptions expiring in 1 day and send warnings.
-    Runs daily at scheduled time.
-    """
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Find users whose subscription ends in next 24 hours and haven't been warned
-        cur.execute("""
-            SELECT user_id, end_date FROM subscribers
-            WHERE end_date > NOW()
-            AND end_date <= NOW() + INTERVAL '24 hours'
-            AND expiry_warned = FALSE
-        """)
-        expiring_users = cur.fetchall()
-
-        for (user_id, end_date) in expiring_users:
-            hours_left = int((end_date - datetime.now()).total_seconds() / 3600)
-            
-            # User ko warning bhejo
-            user_msg = (
-                "⚠️ <b>Subscription Expiring Soon!</b>\n\n"
-                f"📅 Expires: {end_date.strftime('%d-%m-%Y %H:%M')}\n"
-                f"⏰ Time Left: ~{hours_left} hours\n\n"
-                "🔁 Renew karne ke liye:\n"
-                "/start → Buy VIP\n\n"
-                f"❓ Help: @{ADMIN_USERNAME}"
-            )
-            
-            try:
-                await provider_app_instance.bot.send_message(
-                    chat_id=user_id, text=user_msg, parse_mode='HTML'
-                )
-                logger.info(f"Expiry warning sent to {user_id}")
-            except Exception as e:
-                logger.error(f"Failed to warn user {user_id}: {e}")
-            
-            # Admin ko bhi batao
-            admin_msg = (
-                f"⚠️ <b>USER PLAN EXPIRING SOON</b>\n\n"
-                f"👤 User ID: <code>{user_id}</code>\n"
-                f"📅 Expiry: {end_date.strftime('%d-%m-%Y %H:%M')}\n"
-                f"⏰ Hours Left: ~{hours_left}\n"
-            )
-            
-            try:
-                await provider_app_instance.bot.send_message(
-                    chat_id=ADMIN_USER_ID, text=admin_msg, parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify admin about {user_id}: {e}")
-            
-            # Mark as warned
-            cur.execute("UPDATE subscribers SET expiry_warned = TRUE WHERE user_id = %s", (user_id,))
-            conn.commit()
-            
-            await asyncio.sleep(2)  # Rate limit protection
-
-        if expiring_users:
-            logger.info(f"✅ Processed {len(expiring_users)} expiring subscriptions")
-        
-        cur.close()
-    except Exception as e:
-        logger.error(f"Expiring check error: {e}")
-    finally:
-        if conn:
-            db_pool.putconn(conn)
-
-
-async def check_expired_subscriptions(provider_app_instance: Application):
-    """
-    Check for subscriptions that have expired and send notifications.
-    Runs daily at scheduled time.
-    """
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        # Find expired subscriptions that haven't been notified
-        cur.execute("""
-            SELECT user_id, end_date FROM subscribers
-            WHERE end_date <= NOW()
-            AND end_date > NOW() - INTERVAL '7 days'
-            AND notified = FALSE
-        """)
-        expired_users = cur.fetchall()
-
-        for (user_id, end_date) in expired_users:
-            # User ko notification
-            user_msg = (
-                "❌ <b>VIP Subscription Expired!</b>\n\n"
-                f"📅 Expired on: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
-                "🎬 Videos access restore karne ke liye renew karein:\n"
-                "/start → Buy VIP\n\n"
-                f"❓ Help: @{ADMIN_USERNAME}"
-            )
-
-            try:
-                await provider_app_instance.bot.send_message(
-                    chat_id=user_id, text=user_msg, parse_mode='HTML'
-                )
-                logger.info(f"Expiry notification sent to {user_id}")
-            except Exception as e:
-                logger.error(f"Failed to notify user {user_id}: {e}")
-
-            # Admin ko notification
-            admin_msg = (
-                f"🔔 <b>USER PLAN EXPIRED</b>\n\n"
-                f"👤 User ID: <code>{user_id}</code>\n"
-                f"📅 Expired On: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
-                f"User ka VIP plan khatam ho chuka hai."
-            )
-
-            try:
-                await provider_app_instance.bot.send_message(
-                    chat_id=ADMIN_USER_ID, text=admin_msg, parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify admin: {e}")
-
-            # Mark as notified
-            cur.execute("UPDATE subscribers SET notified = TRUE WHERE user_id = %s", (user_id,))
-            conn.commit()
-
-            await asyncio.sleep(2)  # Rate limit protection
-
-        if expired_users:
-            logger.info(f"✅ Processed {len(expired_users)} expired subscriptions")
-
-        cur.close()
-    except Exception as e:
-        logger.error(f"Expiry check error: {e}")
-    finally:
-        if conn:
-            db_pool.putconn(conn)
 
 
 async def schedule_daily_check(provider_app_instance: Application):
