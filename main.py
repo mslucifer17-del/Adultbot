@@ -120,6 +120,19 @@ def setup_db():
             )
         """)
 
+        # 🧹 NAYA TABLE: Auto-Delete Queue ke liye
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS auto_delete_queue (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL,
+                delete_at TIMESTAMP NOT NULL
+            )
+        """)
+        # Fast searching ke liye index
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_delete_at ON auto_delete_queue (delete_at);")
+
+        
         # Updated subscribers table with notification columns
         cur.execute("""
             CREATE TABLE IF NOT EXISTS subscribers (
@@ -185,6 +198,45 @@ def get_db_connection():
 
 
 # ================= HELPER FUNCTIONS =================
+
+def add_to_delete_queue(chat_id, message_ids, delay_seconds):
+    """Messages ko DB me save karta hai taaki restart par safe rahein"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        delete_at = datetime.now() + timedelta(seconds=delay_seconds)
+        for msg_id in message_ids:
+            cur.execute(
+                "INSERT INTO auto_delete_queue (chat_id, message_id, delete_at) VALUES (%s, %s, %s)",
+                (chat_id, msg_id, delete_at)
+            )
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        logger.error(f"Error adding to delete queue: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+def remove_from_delete_queue(chat_id, message_ids):
+    """Agar memory me successful delete ho gaya, toh DB se hata do"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        # PostgreSQL ka ANY operator use karke ek sath sab delete karenge
+        cur.execute(
+            "DELETE FROM auto_delete_queue WHERE chat_id = %s AND message_id = ANY(%s)",
+            (chat_id, message_ids)
+        )
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        logger.error(f"Error removing from delete queue: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
 def construct_file_url(channel_id, message_id):
     channel_str = str(channel_id)
@@ -420,19 +472,25 @@ def make_short_photo_caption(title, qualities_info):
 
 
 async def schedule_delete(context, chat_id, message_id, delay=120):
+    # 1. Save to DB
+    add_to_delete_queue(chat_id, [message_id], delay)
     try:
         await asyncio.sleep(delay)
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
         logger.info(f"Text msg {message_id} deleted from {chat_id}")
+        # 2. Remove from DB after successful delete
+        remove_from_delete_queue(chat_id, [message_id])
     except Exception as e:
         logger.error(f"Text delete error {message_id}: {e}")
 
-
 async def auto_delete_with_notification(context, chat_id, message_ids_to_delete, delete_time=AUTO_DELETE_TIME):
-    try:
-        if isinstance(message_ids_to_delete, int):
-            message_ids_to_delete = [message_ids_to_delete]
+    if isinstance(message_ids_to_delete, int):
+        message_ids_to_delete = [message_ids_to_delete]
 
+    # 1. Save all files to DB safely
+    add_to_delete_queue(chat_id, message_ids_to_delete, delete_time)
+
+    try:
         wait_time = max(delete_time - 30, 60)
         await asyncio.sleep(wait_time)
 
@@ -447,6 +505,8 @@ async def auto_delete_with_notification(context, chat_id, message_ids_to_delete,
                 )
             )
             message_ids_to_delete.append(warning_msg.message_id)
+            # Warning msg ko bhi queue me daal do chote timer ke sath
+            add_to_delete_queue(chat_id, [warning_msg.message_id], 35)
         except Exception as e:
             logger.error(f"Warning message error: {e}")
 
@@ -458,6 +518,9 @@ async def auto_delete_with_notification(context, chat_id, message_ids_to_delete,
                 logger.info(f"Message {msg_id} deleted for chat: {chat_id}")
             except Exception as e:
                 logger.error(f"Failed to delete message {msg_id}: {e}")
+
+        # 2. Cleanup DB 
+        remove_from_delete_queue(chat_id, message_ids_to_delete)
 
         try:
             final_msg = await context.bot.send_message(
@@ -475,6 +538,7 @@ async def auto_delete_with_notification(context, chat_id, message_ids_to_delete,
                 pass
         except Exception as e:
             logger.error(f"Final notice error: {e}")
+            
     except Exception as e:
         logger.error(f"Auto-delete error: {e}")
 
@@ -2415,7 +2479,49 @@ async def schedule_daily_check(provider_app_instance: Application):
             logger.info("⏳ Waiting 1 hour before retry...")
             await asyncio.sleep(3600)
 
+async def persistent_auto_delete_worker(app: Application):
+    """
+    Background worker jo har 10 second me DB check karega, 
+    restart ke time miss hue messages ko delete karega.
+    """
+    await asyncio.sleep(10) # Bot theek se start hone ka wait
+    logger.info("🧹 Persistent Auto-Delete Worker Started!")
 
+    while True:
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            
+            # Jo messages ka time nikal chuka hai unhe uthao
+            cur.execute(
+                "SELECT id, chat_id, message_id FROM auto_delete_queue WHERE delete_at <= NOW() LIMIT 50"
+            )
+            rows = cur.fetchall()
+            
+            if rows:
+                for row_id, chat_id, msg_id in rows:
+                    try:
+                        # Telegram se delete karo
+                        await app.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                        logger.info(f"🧹 Worker deleted missed message {msg_id} from {chat_id}")
+                    except Exception:
+                        pass # File pehle hi ud chuki hai, ignore karo
+                        
+                    # DB se turant clean karo
+                    cur.execute("DELETE FROM auto_delete_queue WHERE id = %s", (row_id,))
+                
+                conn.commit()
+            cur.close()
+        except Exception as e:
+            logger.error(f"Auto-delete worker error: {e}")
+        finally:
+            if conn:
+                db_pool.putconn(conn)
+            
+        # Har 10 second mein DB scan karega
+        await asyncio.sleep(10)
+        
 async def check_expiring_soon(provider_app_instance: Application):
     """
     Check for subscriptions expiring in 1 day and send warnings.
@@ -2727,27 +2833,17 @@ async def run_bots():
         print("🎉 BOTH BOTS RUNNING SUCCESSFULLY!")
         print("=" * 60)
         print(f"👤 Admin User ID: {ADMIN_USER_ID}")
-        print(f"👤 Admin Username: @{ADMIN_USERNAME}")
         print(f"🤖 Provider Bot: @{PROVIDER_BOT_USERNAME}")
         print(f"📦 Backup Channel: {BACKUP_1}")
-        print(f"🆓 Free Channel: {FREE_CH if FREE_CH != 0 else 'Not Set'}")
-        print(f"💎 Paid Channel: {PAID_CH if PAID_CH != 0 else 'Not Set'}")
         print(f"🕒 Video Auto-Delete: {AUTO_DELETE_TIME}s")
-        print(f"🕒 Text Auto-Delete: {TEXT_DELETE_TIME}s")
-        print(f"🕒 QR Auto-Delete: {QR_DELETE_TIME}s")
-        print(f"📱 QR Code: {'Available' if QR_AVAILABLE else 'Text Fallback'}")
-        print(f"💰 Subscription: ₹{SUBSCRIPTION_AMOUNT}/month")
-        print(f"🆓 Free Channel Link: {FREE_CHANNEL_LINK}")
         print("=" * 60)
 
+        # 👇 YAHAN HONGE BACKGROUND TASKS START 👇
         print("\n🔄 Starting background tasks...")
         asyncio.create_task(periodic_cleanup(None))
-        
-        # ✨ NEW: Start daily subscription checker
         asyncio.create_task(schedule_daily_check(provider_app))
-        
-        print("✅ Background tasks started")
-        print("🕒 Subscription checker: Daily at 2:00 AM IST")
+        asyncio.create_task(persistent_auto_delete_worker(provider_app))
+        print("✅ Background tasks started (Cleanup, Subscription Checker, Persistent Worker)")
 
         print("\n✨ System ready! Waiting for commands...\n")
 
