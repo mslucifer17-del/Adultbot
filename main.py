@@ -1680,45 +1680,49 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             continue
 
         # ==========================================
-        # FREE CHANNEL: Post with caption + buttons
-        # ==========================================
-        bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
-        post_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📥 Watch Now / Download 📥", url=bot_link)],
-            [InlineKeyboardButton("💎 Buy VIP Subscription", url=buy_link)]
-        ])
-        
-        # 🔥 PREMIUM CAPTION LOGIC 🔥
-        original_html = next((v.get('original_html') for v in video_list if v.get('original_html')), None)
-        
-        if original_html:
-            free_caption = clean_free_channel_caption(original_html)
-            if free_caption:
-                # Agar premium caption mil gaya, toh uske neeche qualities aur link lagao
-                quality_text = " | ".join([q['label'] for q in qualities_info]) if qualities_info else "HD Quality"
-                caption = (
-                    f"{free_caption}\n\n"
-                    f"📊 <b>Available Qualities:</b> {quality_text}\n\n"
-                    f"👇 <b>Watch Full Video & Download Below</b> 👇"
-                )
-            else:
-                caption = build_free_channel_caption(title, qualities_info)
-        else:
-            # Agar koi caption nahi bheja (without caption video thi), toh plain wala use karo
-            caption = build_free_channel_caption(title, qualities_info)
+# FREE CHANNEL: Post with caption + buttons
+# ==========================================
+bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
+post_keyboard = InlineKeyboardMarkup([
+    [InlineKeyboardButton("📥 Watch Now / Download 📥", url=bot_link)],
+    [InlineKeyboardButton("💎 Buy VIP Subscription", url=buy_link)]
+])
 
-        if FREE_CH != 0:
-            posted = False
-            first_vid = video_list[0]
-            thumb_id = first_vid.get('thumb_id')
+# 🔥 PREMIUM CAPTION LOGIC 🔥
+original_html = next((v.get('original_html') for v in video_list if v.get('original_html')), None)
 
-            if thumb_id:
-                result = await send_thumbnail_as_photo(
-                    context, FREE_CH, thumb_id, caption, post_keyboard, has_spoiler=True
-                )
-                if result:
-                    posted = True
-                    logger.info(f"✅ Bulk: Thumbnail posted to FREE channel for '{title}'")
+if original_html:
+    free_caption = clean_free_channel_caption(original_html)
+    if free_caption:
+        # ✅ FIXED: Quote formatting add kiya
+        quality_text = " | ".join([q['label'] for q in qualities_info]) if qualities_info else "HD Quality"
+        
+        # 👇 YEH LINE IMPORTANT HAI - Cleaned caption ko quote mein wrap karo
+        caption = (
+            f"<blockquote>{free_caption}</blockquote>\n\n"  # ✅ Blockquote added
+            f"<blockquote><b>📊 Available Qualities:</b> {quality_text}</blockquote>\n\n"
+            f"<b>👇 Watch Full Video & Download Below 👇</b>"
+        )
+    else:
+        # Agar clean nahi hua toh fallback
+        caption = build_free_channel_caption(title, qualities_info)
+else:
+    # Agar koi caption nahi tha original mein
+    caption = build_free_channel_caption(title, qualities_info)
+
+# ✅ FIXED INDENTATION ERROR HERE
+if FREE_CH != 0:
+    posted = False
+    first_vid = video_list[0]
+    thumb_id = first_vid.get('thumb_id')
+
+    if thumb_id:
+        result = await send_thumbnail_as_photo(
+            context, FREE_CH, thumb_id, caption, post_keyboard, has_spoiler=True
+        )
+        if result:
+            posted = True
+            logger.info(f"✅ Bulk: Thumbnail posted to FREE channel for '{title}'")
 
             if not posted:
                 try:
