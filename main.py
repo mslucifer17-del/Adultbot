@@ -29,6 +29,14 @@ except ImportError:
     QR_AVAILABLE = False
     print("⚠️ qrcode not available - will use text fallback")
 
+# PIL import with fallback
+try:
+    from PIL import Image, ImageEnhance, ImageFilter, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    print("⚠️ PIL/Pillow not available - thumbnail enhancement disabled")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -36,7 +44,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 print("=" * 60)
-print("🚀 APPLICATION STARTING...")
+print("🚀 APPLICATION STARTING - ENHANCED v3.0...")
 print("=" * 60)
 
 # ================= ENVIRONMENT VARIABLES =================
@@ -67,6 +75,10 @@ QR_DELETE_TIME = int(os.environ.get("QR_DELETE_TIME", "600"))
 UPI_ID = os.environ.get("UPI_ID", "tumhara@upi")
 FREE_CHANNEL_LINK = os.environ.get("FREE_CHANNEL_LINK", "https://t.me/+wcYoTQhIz-ZmOTY1")
 SUBSCRIPTION_AMOUNT = os.environ.get("SUBSCRIPTION_AMOUNT", "10")
+
+# Sticker settings (env se bhi le sakte ho)
+STICKER_CHAT_ID = int(os.environ.get("STICKER_CHAT_ID", "-1003576065127"))
+STICKER_MSG_ID = int(os.environ.get("STICKER_MSG_ID", "344"))
 
 # Telegram caption limits
 PHOTO_CAPTION_LIMIT = 1024
@@ -120,7 +132,7 @@ def setup_db():
             )
         """)
 
-        # 🧹 NAYA TABLE: Auto-Delete Queue ke liye
+        # Auto-Delete Queue table
         cur.execute("""
             CREATE TABLE IF NOT EXISTS auto_delete_queue (
                 id SERIAL PRIMARY KEY,
@@ -129,11 +141,9 @@ def setup_db():
                 delete_at TIMESTAMP NOT NULL
             )
         """)
-        # Fast searching ke liye index
         cur.execute("CREATE INDEX IF NOT EXISTS idx_delete_at ON auto_delete_queue (delete_at);")
 
-        
-        # Updated subscribers table with notification columns
+        # Subscribers table with notification columns
         cur.execute("""
             CREATE TABLE IF NOT EXISTS subscribers (
                 user_id BIGINT PRIMARY KEY,
@@ -146,14 +156,13 @@ def setup_db():
             )
         """)
 
-        # Add columns if they don't exist (migration)
+        # Migration: Add columns if they don't exist
         try:
             cur.execute("""
                 SELECT column_name FROM information_schema.columns
                 WHERE table_name = 'subscribers'
             """)
             existing_cols = [row[0] for row in cur.fetchall()]
-            
             if 'expiry_warned' not in existing_cols:
                 cur.execute("ALTER TABLE subscribers ADD COLUMN expiry_warned BOOLEAN DEFAULT FALSE")
                 logger.info("Added expiry_warned column")
@@ -166,7 +175,6 @@ def setup_db():
                 WHERE table_name = 'video_qualities'
             """)
             existing_cols = [row[0] for row in cur.fetchall()]
-
             if existing_cols:
                 if 'file_id' in existing_cols and 'file_url' not in existing_cols:
                     cur.execute("ALTER TABLE video_qualities RENAME COLUMN file_id TO file_url")
@@ -219,13 +227,13 @@ def add_to_delete_queue(chat_id, message_ids, delay_seconds):
         if conn:
             db_pool.putconn(conn)
 
+
 def remove_from_delete_queue(chat_id, message_ids):
     """Agar memory me successful delete ho gaya, toh DB se hata do"""
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        # PostgreSQL ka ANY operator use karke ek sath sab delete karenge
         cur.execute(
             "DELETE FROM auto_delete_queue WHERE chat_id = %s AND message_id = ANY(%s)",
             (chat_id, message_ids)
@@ -237,6 +245,7 @@ def remove_from_delete_queue(chat_id, message_ids):
     finally:
         if conn:
             db_pool.putconn(conn)
+
 
 def construct_file_url(channel_id, message_id):
     channel_str = str(channel_id)
@@ -262,37 +271,31 @@ def parse_file_url(file_url):
 def clean_title(raw_title):
     if not raw_title:
         return "Exclusive Premium Content"
-        
+
     lines = raw_title.split('\n')
     cleaned_lines = []
-    
+
     for line in lines:
         lower_line = line.lower()
-        # 🛑 BREAK CONDITIONS (Yahan se kachra cut hoga)
         if (
-            'watch & download' in lower_line or 
-            'watch and download' in lower_line or 
-            'how to open' in lower_line or 
+            'watch & download' in lower_line or
+            'watch and download' in lower_line or
+            'how to open' in lower_line or
             'ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ' in lower_line or
-            '╔══' in line or 
+            '╔══' in line or
             '╚══' in line or
             '📥' in line or
             '𝗪𝗔𝗧𝗖𝗛' in line or
             '𝗗𝗢𝗪𝗡𝗟𝗢𝗔𝗗' in line
         ):
-            break 
-        
-        # Username mentions hata do
+            break
         clean_line = re.sub(r'@\w+', '', line)
         cleaned_lines.append(clean_line)
-        
-    # Neeche ki khali lines saaf karo
+
     while cleaned_lines and not cleaned_lines[-1].strip():
         cleaned_lines.pop()
-        
+
     title = '\n'.join(cleaned_lines).strip()
-    
-    # Purane extensions aur words remove karne ka logic
     title = re.sub(r'\.(mkv|mp4|avi|mov|wmv|flv|webm|m4v)', '', title, flags=re.IGNORECASE)
     unwanted_patterns = [
         r'\b(Seva|HEVC|HDRip|UNRAT|UNRATED|720p|1080p|480p|4K|2160p)\b',
@@ -301,13 +304,12 @@ def clean_title(raw_title):
     ]
     for pattern in unwanted_patterns:
         title = re.sub(pattern, '', title, flags=re.IGNORECASE)
-        
+
     title = title.strip()
-    
     if len(title) < 2:
         return "Exclusive Premium Content"
-        
     return title
+
 
 def generate_display_title(cleaned_title):
     if len(cleaned_title) > 50:
@@ -379,6 +381,20 @@ def format_file_size(size_bytes):
         return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
 
 
+def format_duration(seconds):
+    """Duration ko readable format mein convert karo"""
+    if not seconds or seconds <= 0:
+        return "Unknown"
+    mins, secs = divmod(seconds, 60)
+    hours, mins = divmod(mins, 60)
+    if hours > 0:
+        return f"{hours}h {mins}m {secs}s"
+    elif mins > 0:
+        return f"{mins}m {secs}s"
+    else:
+        return f"{secs}s"
+
+
 def generate_upi_qr(user_id, user_name, amount):
     safe_name = re.sub(r'[^a-zA-Z0-9 ]', '', user_name)[:30].strip()
     if not safe_name:
@@ -410,26 +426,18 @@ def generate_upi_qr(user_id, user_name, amount):
     return bio, note
 
 
-def build_backup_caption(title, quality_label=""):
-    safe_title = html_escape(title)
-    if quality_label:
-        return f"🔒 {safe_title} [{quality_label}]"
-    return f"🔒 {safe_title}"
-
-
 def build_free_channel_caption(title, qualities_info):
+    """Premium styled caption for free channel"""
     skip_title = title in ("Exclusive Premium Content",) or title.startswith("Untitled Video")
     quality_text = " | ".join([q['label'] for q in qualities_info]) if qualities_info else "HD Quality"
 
     if skip_title:
-        # Bina title wali videos ke liye (Fallback)
         return (
             f"<blockquote><b>🔞 ᴇxᴄʟᴜsɪᴠᴇ ᴘʀᴇᴍɪᴜᴍ ᴄᴏɴᴛᴇɴᴛ</b></blockquote>\n"
             f"<blockquote><b>📊 ᴀᴠᴀɪʟᴀʙʟᴇ Qᴜᴀʟɪᴛɪᴇs:</b> {quality_text}</blockquote>\n\n"
             f"<b>👇 ᴡᴀᴛᴄʜ ғᴜʟʟ ᴠɪᴅᴇᴏ & ᴅᴏᴡɴʟᴏᴀᴅ ʙᴇʟᴏᴡ 👇</b>"
         )
     else:
-        # Title wali videos ke liye
         safe_title = html_escape(title)
         return (
             f"<blockquote><b>🎬 {safe_title}</b></blockquote>\n"
@@ -437,6 +445,7 @@ def build_free_channel_caption(title, qualities_info):
             f"<blockquote><b>📊 Qᴜᴀʟɪᴛɪᴇs:</b> {quality_text}</blockquote>\n\n"
             f"<b>👇 ᴡᴀᴛᴄʜ ғᴜʟʟ ᴠɪᴅᴇᴏ & ᴅᴏᴡɴʟᴏᴀᴅ ʙᴇʟᴏᴡ 👇</b>"
         )
+
 
 def truncate_caption_for_photo(caption_text, max_len=1024):
     if not caption_text:
@@ -448,6 +457,7 @@ def truncate_caption_for_photo(caption_text, max_len=1024):
     open_b = truncated.count('<b>') - truncated.count('</b>')
     open_i = truncated.count('<i>') - truncated.count('</i>')
     open_code = truncated.count('<code>') - truncated.count('</code>')
+    open_bq = truncated.count('<blockquote>') - truncated.count('</blockquote>')
 
     suffix = ""
     if open_code > 0:
@@ -456,6 +466,8 @@ def truncate_caption_for_photo(caption_text, max_len=1024):
         suffix += '</i>' * open_i
     if open_b > 0:
         suffix += '</b>' * open_b
+    if open_bq > 0:
+        suffix += '</blockquote>' * open_bq
 
     truncated = truncated.rstrip() + "…" + suffix
     return truncated
@@ -472,23 +484,77 @@ def make_short_photo_caption(title, qualities_info):
     )
 
 
+def clean_free_channel_caption(original_html):
+    """Original caption se clean version banao (without watch/download section)"""
+    if not original_html:
+        return None
+
+    lines = original_html.split('\n')
+    cleaned_lines = []
+
+    for line in lines:
+        lower_line = line.lower()
+        if (
+            'watch & download' in lower_line or
+            'watch and download' in lower_line or
+            'how to open' in lower_line or
+            'ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ' in lower_line or
+            '╔══' in line or
+            '╚══' in line or
+            ('📥' in line and 'watch' in lower_line)
+        ):
+            break
+        cleaned_lines.append(line)
+
+    while cleaned_lines:
+        text_only = re.sub(r'<[^>]+>', '', cleaned_lines[-1]).strip()
+        if not text_only or not re.search(r'[a-zA-Z0-9]', text_only):
+            cleaned_lines.pop()
+        else:
+            break
+
+    caption = '\n'.join(cleaned_lines).strip()
+    if not caption:
+        return None
+
+    # Auto-close hanging HTML tags
+    tags = re.findall(r'<(/?[a-zA-Z0-9\-]+)[^>]*>', caption)
+    opened = []
+    for tag in tags:
+        if tag.startswith('/'):
+            tag_name = tag[1:]
+            if opened and opened[-1] == tag_name:
+                opened.pop()
+            elif tag_name in opened:
+                opened.remove(tag_name)
+        else:
+            opened.append(tag)
+
+    for tag in reversed(opened):
+        caption += f'</{tag}>'
+
+    return caption
+
+
+# ================= SCHEDULE / DELETE HELPERS =================
+
 async def schedule_delete(context, chat_id, message_id, delay=120):
-    # 1. Save to DB
+    """Single message ko delay ke baad delete karo"""
     add_to_delete_queue(chat_id, [message_id], delay)
     try:
         await asyncio.sleep(delay)
         await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
         logger.info(f"Text msg {message_id} deleted from {chat_id}")
-        # 2. Remove from DB after successful delete
         remove_from_delete_queue(chat_id, [message_id])
     except Exception as e:
         logger.error(f"Text delete error {message_id}: {e}")
 
+
 async def auto_delete_with_notification(context, chat_id, message_ids_to_delete, delete_time=AUTO_DELETE_TIME):
+    """Videos ko warning ke saath auto-delete karo"""
     if isinstance(message_ids_to_delete, int):
         message_ids_to_delete = [message_ids_to_delete]
 
-    # 1. Save all files to DB safely
     add_to_delete_queue(chat_id, message_ids_to_delete, delete_time)
 
     try:
@@ -499,14 +565,14 @@ async def auto_delete_with_notification(context, chat_id, message_ids_to_delete,
             warning_msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    "⚠️ IMPORTANT NOTICE\n\n"
-                    "🕒 Videos 30 seconds mein auto-delete ho jayengi!\n\n"
-                    "💾 Jaldi se Saved Messages mein forward kar lo!\n\n"
+                    "⚠️ <b>IMPORTANT NOTICE</b>\n\n"
+                    "🕒 Videos <b>30 seconds</b> mein auto-delete ho jayengi!\n\n"
+                    "💾 Jaldi se <b>Saved Messages</b> mein forward kar lo!\n\n"
                     "🔒 Yeh copyright protection ke liye hai."
-                )
+                ),
+                parse_mode='HTML'
             )
             message_ids_to_delete.append(warning_msg.message_id)
-            # Warning msg ko bhi queue me daal do chote timer ke sath
             add_to_delete_queue(chat_id, [warning_msg.message_id], 35)
         except Exception as e:
             logger.error(f"Warning message error: {e}")
@@ -520,17 +586,17 @@ async def auto_delete_with_notification(context, chat_id, message_ids_to_delete,
             except Exception as e:
                 logger.error(f"Failed to delete message {msg_id}: {e}")
 
-        # 2. Cleanup DB 
         remove_from_delete_queue(chat_id, message_ids_to_delete)
 
         try:
             final_msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    "🗑️ Video(s) Auto-Deleted!\n\n"
+                    "🗑️ <b>Video(s) Auto-Deleted!</b>\n\n"
                     "✅ Agar forward kar liya hai toh saved messages mein check karein.\n"
                     "❌ Nahi kiya toh dobara link se access karein."
-                )
+                ),
+                parse_mode='HTML'
             )
             await asyncio.sleep(30)
             try:
@@ -539,7 +605,7 @@ async def auto_delete_with_notification(context, chat_id, message_ids_to_delete,
                 pass
         except Exception as e:
             logger.error(f"Final notice error: {e}")
-            
+
     except Exception as e:
         logger.error(f"Auto-delete error: {e}")
 
@@ -573,7 +639,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🤖 Bot Server Running! ✅"
+    return "🤖 Bot Server Running! ✅ v3.0 Enhanced"
 
 
 @app.route('/watch/<int:vid_id>')
@@ -588,46 +654,36 @@ def run_flask():
     logger.info(f"🌐 Flask server running on port {port}")
 
 
-# ================= PHOTO SEND HELPERS =================
+# ================= SAFE SEND HELPERS =================
 
 async def send_photo_with_caption_safe(context, chat_id, photo, caption, reply_markup=None, has_spoiler=False):
+    """Photo send karo with safe caption handling"""
     safe_caption = truncate_caption_for_photo(caption, PHOTO_CAPTION_LIMIT)
     try:
         msg = await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=photo,
-            caption=safe_caption,
-            parse_mode='HTML',
-            reply_markup=reply_markup,
-            has_spoiler=has_spoiler
+            chat_id=chat_id, photo=photo, caption=safe_caption,
+            parse_mode='HTML', reply_markup=reply_markup, has_spoiler=has_spoiler
         )
-        logger.info(f"✅ Photo sent to {chat_id} with caption ({len(safe_caption)} chars)")
+        logger.info(f"✅ Photo sent to {chat_id} ({len(safe_caption)} chars)")
         return msg
     except Exception as e1:
-        logger.warning(f"Photo send attempt 1 failed ({len(safe_caption)} chars): {e1}")
+        logger.warning(f"Photo send attempt 1 failed: {e1}")
 
     try:
-        minimal_caption = "🔞 Premium Content\n\n👇 Watch & Download Below 👇"
+        minimal = "🔞 Premium Content\n\n👇 Watch & Download Below 👇"
         msg = await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=photo,
-            caption=minimal_caption,
-            reply_markup=reply_markup,
-            has_spoiler=has_spoiler
+            chat_id=chat_id, photo=photo, caption=minimal,
+            reply_markup=reply_markup, has_spoiler=has_spoiler
         )
-        logger.info(f"✅ Photo sent to {chat_id} with minimal caption (fallback)")
         return msg
     except Exception as e2:
-        logger.warning(f"Photo send attempt 2 (minimal) failed: {e2}")
+        logger.warning(f"Photo send attempt 2 failed: {e2}")
 
     try:
         msg = await context.bot.send_photo(
-            chat_id=chat_id,
-            photo=photo,
-            reply_markup=reply_markup,
-            has_spoiler=has_spoiler
+            chat_id=chat_id, photo=photo,
+            reply_markup=reply_markup, has_spoiler=has_spoiler
         )
-        logger.info(f"✅ Photo sent to {chat_id} with NO caption (last resort)")
         return msg
     except Exception as e3:
         logger.error(f"❌ Photo send completely failed for {chat_id}: {e3}")
@@ -635,15 +691,12 @@ async def send_photo_with_caption_safe(context, chat_id, photo, caption, reply_m
 
 
 async def send_video_with_caption_safe(context, chat_id, video, caption, reply_markup=None):
+    """Video send karo with safe caption handling"""
     safe_caption = truncate_caption_for_photo(caption, PHOTO_CAPTION_LIMIT)
     try:
         msg = await context.bot.send_video(
-            chat_id=chat_id,
-            video=video,
-            caption=safe_caption,
-            parse_mode='HTML',
-            reply_markup=reply_markup,
-            supports_streaming=True
+            chat_id=chat_id, video=video, caption=safe_caption,
+            parse_mode='HTML', reply_markup=reply_markup, supports_streaming=True
         )
         logger.info(f"✅ Video sent to {chat_id}")
         return msg
@@ -651,113 +704,131 @@ async def send_video_with_caption_safe(context, chat_id, video, caption, reply_m
         logger.warning(f"Video send attempt 1 failed: {e1}")
 
     try:
-        minimal_caption = "🔞 Premium Content\n\n👇 Watch & Download Below 👇"
+        minimal = "🔞 Premium Content\n\n👇 Watch & Download Below 👇"
         msg = await context.bot.send_video(
-            chat_id=chat_id,
-            video=video,
-            caption=minimal_caption,
-            reply_markup=reply_markup,
-            supports_streaming=True
+            chat_id=chat_id, video=video, caption=minimal,
+            reply_markup=reply_markup, supports_streaming=True
         )
-        logger.info(f"✅ Video sent to {chat_id} with minimal caption")
         return msg
     except Exception as e2:
         logger.error(f"❌ Video send completely failed for {chat_id}: {e2}")
         return None
 
-# ================= IMAGE ENHANCEMENT FUNCTIONS =================
-from PIL import Image, ImageEnhance, ImageFilter
+
+async def send_animation_with_caption_safe(context, chat_id, animation, caption, reply_markup=None):
+    """Animation/GIF send karo with safe caption handling"""
+    safe_caption = truncate_caption_for_photo(caption, PHOTO_CAPTION_LIMIT)
+    try:
+        msg = await context.bot.send_animation(
+            chat_id=chat_id, animation=animation, caption=safe_caption,
+            parse_mode='HTML', reply_markup=reply_markup
+        )
+        logger.info(f"✅ Animation sent to {chat_id}")
+        return msg
+    except Exception as e1:
+        logger.warning(f"Animation send attempt 1 failed: {e1}")
+
+    try:
+        minimal = "🔞 Premium Content\n\n👇 Watch & Download Below 👇"
+        msg = await context.bot.send_animation(
+            chat_id=chat_id, animation=animation, caption=minimal,
+            reply_markup=reply_markup
+        )
+        return msg
+    except Exception as e2:
+        logger.error(f"❌ Animation send completely failed: {e2}")
+        return None
+
+
+async def send_document_with_caption_safe(context, chat_id, document, caption, reply_markup=None):
+    """Document send karo with safe caption handling"""
+    safe_caption = truncate_caption_for_photo(caption, PHOTO_CAPTION_LIMIT)
+    try:
+        msg = await context.bot.send_document(
+            chat_id=chat_id, document=document, caption=safe_caption,
+            parse_mode='HTML', reply_markup=reply_markup
+        )
+        logger.info(f"✅ Document sent to {chat_id}")
+        return msg
+    except Exception as e1:
+        logger.warning(f"Document send attempt 1 failed: {e1}")
+
+    try:
+        minimal = "🔞 Premium Content\n\n👇 Watch & Download Below 👇"
+        msg = await context.bot.send_document(
+            chat_id=chat_id, document=document, caption=minimal,
+            reply_markup=reply_markup
+        )
+        return msg
+    except Exception as e2:
+        logger.error(f"❌ Document send completely failed: {e2}")
+        return None
+
+
+# ================= IMAGE ENHANCEMENT =================
 
 async def enhance_thumbnail(context, thumb_file_id, target_width=1280, target_height=720):
-    """
-    Download thumbnail, enhance quality, and return BytesIO object.
-    
-    Features:
-    - Upscale to HD resolution (1280x720)
-    - Sharpen image
-    - Enhance contrast & brightness
-    - Reduce noise
-    - Optimize for Telegram
-    """
+    """Thumbnail ko download, enhance aur return karo as BytesIO"""
+    if not PIL_AVAILABLE:
+        # PIL nahi hai toh simple download
+        try:
+            file = await context.bot.get_file(thumb_file_id)
+            thumb_bytes = await file.download_as_bytearray()
+            fallback = BytesIO(thumb_bytes)
+            fallback.name = "thumbnail.jpg"
+            return fallback
+        except:
+            return None
+
     try:
-        # Download original thumbnail
         file = await context.bot.get_file(thumb_file_id)
         thumb_bytes = await file.download_as_bytearray()
-        
-        # Open with PIL
         img = Image.open(BytesIO(thumb_bytes))
-        original_format = img.format or 'JPEG'
-        
-        # Convert to RGB if needed (remove alpha channel)
+
+        # Convert to RGB
         if img.mode in ('RGBA', 'LA', 'P'):
             background = Image.new('RGB', img.size, (0, 0, 0))
             if img.mode == 'P':
                 img = img.convert('RGBA')
-            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+            if img.mode == 'RGBA':
+                background.paste(img, mask=img.split()[-1])
+            else:
+                background.paste(img)
             img = background
         elif img.mode != 'RGB':
             img = img.convert('RGB')
-        
-        # Calculate aspect ratio
+
+        # Smart resize
         original_width, original_height = img.size
         aspect_ratio = original_width / original_height
         target_aspect = target_width / target_height
-        
-        # Smart resize maintaining aspect ratio
+
         if aspect_ratio > target_aspect:
-            # Width is limiting factor
             new_width = target_width
             new_height = int(target_width / aspect_ratio)
         else:
-            # Height is limiting factor
             new_height = target_height
             new_width = int(target_height * aspect_ratio)
-        
-        # Use LANCZOS for high-quality upscaling
+
         img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-        
+
         # Enhancement pipeline
-        
-        # 1. Sharpen (make edges crisp)
-        enhancer = ImageEnhance.Sharpness(img)
-        img = enhancer.enhance(1.5)  # 1.0 = original, >1 = sharper
-        
-        # 2. Enhance contrast
-        enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(1.2)  # Slight contrast boost
-        
-        # 3. Enhance brightness (if too dark)
-        enhancer = ImageEnhance.Brightness(img)
-        img = enhancer.enhance(1.1)  # Slight brightness boost
-        
-        # 4. Enhance color saturation
-        enhancer = ImageEnhance.Color(img)
-        img = enhancer.enhance(1.15)  # Make colors pop
-        
-        # 5. Apply subtle unsharp mask for extra sharpness
+        img = ImageEnhance.Sharpness(img).enhance(1.5)
+        img = ImageEnhance.Contrast(img).enhance(1.2)
+        img = ImageEnhance.Brightness(img).enhance(1.1)
+        img = ImageEnhance.Color(img).enhance(1.15)
         img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
-        
-        # 6. Reduce noise (optional - smooth out compression artifacts)
-        # img = img.filter(ImageFilter.SMOOTH_MORE)
-        
-        # Save to BytesIO with high quality
+
         output = BytesIO()
-        img.save(
-            output, 
-            format='JPEG',
-            quality=95,  # High quality (1-100)
-            optimize=True,  # Optimize file size without losing quality
-            progressive=True  # Progressive JPEG (loads gradually)
-        )
+        img.save(output, format='JPEG', quality=95, optimize=True, progressive=True)
         output.seek(0)
         output.name = "enhanced_thumbnail.jpg"
-        
+
         logger.info(f"✨ Thumbnail enhanced: {original_width}x{original_height} → {new_width}x{new_height}")
         return output
-        
+
     except Exception as e:
         logger.error(f"Enhancement failed: {e}")
-        # Fallback: return original
         try:
             file = await context.bot.get_file(thumb_file_id)
             thumb_bytes = await file.download_as_bytearray()
@@ -769,213 +840,158 @@ async def enhance_thumbnail(context, thumb_file_id, target_width=1280, target_he
 
 
 async def create_placeholder_thumbnail(title, width=1280, height=720):
-    """
-    Create a nice-looking placeholder thumbnail if no thumbnail available.
-    """
+    """Agar koi thumbnail nahi hai toh placeholder banao"""
+    if not PIL_AVAILABLE:
+        return None
+
     try:
-        from PIL import ImageDraw, ImageFont
-        
-        # Create gradient background
         img = Image.new('RGB', (width, height), color='#1a1a2e')
         draw = ImageDraw.Draw(img)
-        
-        # Add gradient effect
+
         for i in range(height):
-            shade = int(26 + (i / height) * 30)  # Gradient from dark to lighter
-            draw.rectangle([(0, i), (width, i+1)], fill=f'#{shade:02x}{shade:02x}{shade+10:02x}')
-        
-        # Add title text
+            shade = int(26 + (i / height) * 30)
+            draw.rectangle([(0, i), (width, i + 1)], fill=f'#{shade:02x}{shade:02x}{shade + 10:02x}')
+
         try:
-            # Try to use a nice font (may not work on all systems)
             font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 60)
         except:
             font = ImageFont.load_default()
-        
-        # Truncate title if too long
+
         display_title = title[:40] + "..." if len(title) > 40 else title
-        
-        # Center text
         text_bbox = draw.textbbox((0, 0), display_title, font=font)
         text_width = text_bbox[2] - text_bbox[0]
         text_height = text_bbox[3] - text_bbox[1]
-        
         text_x = (width - text_width) // 2
         text_y = (height - text_height) // 2
-        
-        # Add shadow
+
         draw.text((text_x + 3, text_y + 3), display_title, fill='#000000', font=font)
-        # Add main text
         draw.text((text_x, text_y), display_title, fill='#ffffff', font=font)
-        
-        # Add watermark
+
         watermark = "🔞 Premium Content"
         try:
             wm_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 30)
         except:
             wm_font = ImageFont.load_default()
-        
+
         wm_bbox = draw.textbbox((0, 0), watermark, font=wm_font)
         wm_width = wm_bbox[2] - wm_bbox[0]
         draw.text(((width - wm_width) // 2, height - 80), watermark, fill='#e94560', font=wm_font)
-        
-        # Save to BytesIO
+
         output = BytesIO()
         img.save(output, format='JPEG', quality=90)
         output.seek(0)
         output.name = "placeholder.jpg"
-        
-        logger.info("✨ Placeholder thumbnail created")
         return output
-        
+
     except Exception as e:
         logger.error(f"Placeholder creation failed: {e}")
-        return None
-async def send_animation_with_caption_safe(context, chat_id, animation, caption, reply_markup=None):
-    safe_caption = truncate_caption_for_photo(caption, PHOTO_CAPTION_LIMIT)
-    try:
-        msg = await context.bot.send_animation(
-            chat_id=chat_id,
-            animation=animation,
-            caption=safe_caption,
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
-        logger.info(f"✅ Animation sent to {chat_id}")
-        return msg
-    except Exception as e1:
-        logger.warning(f"Animation send attempt 1 failed: {e1}")
-
-    try:
-        minimal_caption = "🔞 Premium Content\n\n👇 Watch & Download Below 👇"
-        msg = await context.bot.send_animation(
-            chat_id=chat_id,
-            animation=animation,
-            caption=minimal_caption,
-            reply_markup=reply_markup
-        )
-        return msg
-    except Exception as e2:
-        logger.error(f"❌ Animation send completely failed for {chat_id}: {e2}")
-        return None
-
-
-async def send_document_with_caption_safe(context, chat_id, document, caption, reply_markup=None):
-    safe_caption = truncate_caption_for_photo(caption, PHOTO_CAPTION_LIMIT)
-    try:
-        msg = await context.bot.send_document(
-            chat_id=chat_id,
-            document=document,
-            caption=safe_caption,
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
-        logger.info(f"✅ Document sent to {chat_id}")
-        return msg
-    except Exception as e1:
-        logger.warning(f"Document send attempt 1 failed: {e1}")
-
-    try:
-        minimal_caption = "🔞 Premium Content\n\n👇 Watch & Download Below 👇"
-        msg = await context.bot.send_document(
-            chat_id=chat_id,
-            document=document,
-            caption=minimal_caption,
-            reply_markup=reply_markup
-        )
-        return msg
-    except Exception as e2:
-        logger.error(f"❌ Document send completely failed for {chat_id}: {e2}")
         return None
 
 
 async def send_thumbnail_as_photo(context, chat_id, thumb_id, caption, reply_markup=None, has_spoiler=False):
-    """
-    Download thumbnail, ENHANCE IT, and send as photo with safe caption.
-    """
+    """Thumbnail download, enhance, aur photo ke roop mein bhejo"""
     try:
-        # 🎨 ENHANCEMENT ENABLED
         enhanced_photo = await enhance_thumbnail(context, thumb_id)
-        
         if enhanced_photo:
             msg = await send_photo_with_caption_safe(
                 context, chat_id, enhanced_photo, caption, reply_markup, has_spoiler
             )
             if msg:
-                logger.info(f"✨ Enhanced thumbnail sent to {chat_id} (spoiler={has_spoiler})")
+                logger.info(f"✨ Enhanced thumbnail sent to {chat_id}")
             return msg
-        else:
-            # Fallback to original if enhancement fails
-            logger.warning("Enhancement failed, sending original thumbnail")
-            file = await context.bot.get_file(thumb_id)
-            thumb_bytes = await file.download_as_bytearray()
-            photo_file = BytesIO(thumb_bytes)
-            photo_file.name = "thumbnail.jpg"
-            
-            msg = await send_photo_with_caption_safe(
-                context, chat_id, photo_file, caption, reply_markup, has_spoiler
-            )
-            return msg
-            
+        return None
     except Exception as e:
         logger.error(f"Failed to send thumbnail as photo: {e}")
         return None
 
 
-def clean_free_channel_caption(original_html):
-    if not original_html:
-        return None
+# =============================================================================
+#   🔥 CORE FIX: TRIM/PREVIEW SEND HELPER (YEH FUNCTION SABSE IMPORTANT HAI)
+# =============================================================================
 
-    lines = original_html.split('\n')
-    cleaned_lines = []
-
-    for line in lines:
-        lower_line = line.lower()
-        
-        # 🛑 BREAK CONDITIONS
-        if (
-            'watch & download' in lower_line or 
-            'watch and download' in lower_line or 
-            'how to open' in lower_line or 
-            'ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ' in lower_line or
-            '╔══' in line or 
-            '╚══' in line or
-            ('📥' in line and 'watch' in lower_line)
-        ):
-            break 
-        
-        cleaned_lines.append(line)
-
-    # 🧹 CLEANUP
-    while cleaned_lines:
-        text_only = re.sub(r'<[^>]+>', '', cleaned_lines[-1]).strip()
-        if not text_only or not re.search(r'[a-zA-Z0-9]', text_only):
-            cleaned_lines.pop()
-        else:
-            break
-
-    caption = '\n'.join(cleaned_lines).strip()
+async def send_trim_preview(context, chat_id, trim_type, trim_file_id, trim_chat_id, trim_msg_id, caption, reply_markup=None, has_spoiler=False):
+    """
+    🎯 TRIM/PREVIEW ko correct type se bhejta hai
     
-    if not caption:
+    Parameters:
+    - trim_type: 'video', 'photo', 'animation', 'document', 'skip'
+    - trim_file_id: file_id for photo type
+    - trim_chat_id: original chat_id jahan se trim aaya (for copy_message)
+    - trim_msg_id: original message_id (for copy_message)
+    - caption: caption text
+    - reply_markup: inline keyboard
+    - has_spoiler: spoiler toggle
+    
+    Returns: sent message or None
+    """
+    if trim_type == 'skip' or not trim_type:
         return None
 
-    # 🔥 THE MAGIC FIX: Auto-close hanging HTML tags (like <blockquote> for green lines) 🔥
-    tags = re.findall(r'<(/?[a-zA-Z0-9\-]+)[^>]*>', caption)
-    opened = []
-    for tag in tags:
-        if tag.startswith('/'):
-            tag_name = tag[1:]
-            if opened and opened[-1] == tag_name:
-                opened.pop()
-            elif tag_name in opened:
-                opened.remove(tag_name)
-        else:
-            opened.append(tag)
+    safe_caption = truncate_caption_for_photo(caption, PHOTO_CAPTION_LIMIT)
+
+    # 📸 PHOTO: Direct file_id se bhejo
+    if trim_type == 'photo':
+        result = await send_photo_with_caption_safe(
+            context, chat_id, trim_file_id, caption, reply_markup, has_spoiler
+        )
+        if result:
+            logger.info(f"✅ Trim PHOTO sent to {chat_id}")
+        return result
+
+    # 📹 VIDEO / 🎞️ ANIMATION / 📄 DOCUMENT: copy_message use karo
+    # Yeh TRIM video ko AS-IS copy karega, thumbnail/poster nahi bhejega
+    if trim_type in ('video', 'animation', 'document') and trim_chat_id and trim_msg_id:
+        try:
+            copied = await context.bot.copy_message(
+                chat_id=chat_id,
+                from_chat_id=trim_chat_id,
+                message_id=trim_msg_id,
+                caption=safe_caption,
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+            logger.info(f"✅ Trim {trim_type.upper()} copied to {chat_id} (msg_id={copied.message_id})")
+            return copied
+        except Exception as e:
+            logger.error(f"❌ Trim copy_message failed for {trim_type}: {e}")
             
-    # Jo tags open reh gaye, unhe ulte sequence mein close kar do
-    for tag in reversed(opened):
-        caption += f'</{tag}>'
-        
-    return caption
+            # Fallback: file_id se try karo
+            try:
+                if trim_type == 'video':
+                    result = await send_video_with_caption_safe(
+                        context, chat_id, trim_file_id, caption, reply_markup
+                    )
+                elif trim_type == 'animation':
+                    result = await send_animation_with_caption_safe(
+                        context, chat_id, trim_file_id, caption, reply_markup
+                    )
+                elif trim_type == 'document':
+                    result = await send_document_with_caption_safe(
+                        context, chat_id, trim_file_id, caption, reply_markup
+                    )
+                else:
+                    result = None
+                    
+                if result:
+                    logger.info(f"✅ Trim {trim_type.upper()} sent via file_id fallback to {chat_id}")
+                return result
+            except Exception as e2:
+                logger.error(f"❌ Trim file_id fallback also failed: {e2}")
+                return None
+
+    # Fallback: file_id se try karo (jab chat_id/msg_id nahi hai)
+    if trim_file_id:
+        try:
+            if trim_type == 'video':
+                return await send_video_with_caption_safe(context, chat_id, trim_file_id, caption, reply_markup)
+            elif trim_type == 'animation':
+                return await send_animation_with_caption_safe(context, chat_id, trim_file_id, caption, reply_markup)
+            elif trim_type == 'document':
+                return await send_document_with_caption_safe(context, chat_id, trim_file_id, caption, reply_markup)
+        except Exception as e:
+            logger.error(f"❌ Trim file_id send failed: {e}")
+
+    return None
 
 
 # ================================================================
@@ -993,18 +1009,24 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    backup_status = "Set" if BACKUP_1 != 0 else "NOT SET (REQUIRED!)"
+    backup_status = "✅ Set" if BACKUP_1 != 0 else "❌ NOT SET (REQUIRED!)"
+    free_status = "✅ Set" if FREE_CH != 0 else "⚠️ Not Set"
+    paid_status = "✅ Set" if PAID_CH != 0 else "⚠️ Not Set"
+
     await update.message.reply_text(
-        "🤖 <b>Admin Bot Ready!</b>\n\n"
+        "🤖 <b>Admin Bot Ready! v3.0 Enhanced</b>\n\n"
         "📌 <b>Commands:</b>\n"
-        "  /post - Single video post\n"
-        "  /bulk - Bulk upload multiple videos (with caption grouping)\n"
-        "  /test_expiry - Manual expiry check database test\n"
+        "  /post - Single video post (trim + full)\n"
+        "  /bulk - Bulk upload multiple videos\n"
+        "  /stats - Bot statistics\n"
+        "  /check_expiry - Manual expiry check\n"
         "  /cancel - Cancel current operation\n"
         "  /start - Reset everything\n\n"
         f"📦 Backup Channel: {backup_status}\n"
+        f"🆓 Free Channel: {free_status}\n"
+        f"💎 Paid Channel: {paid_status}\n\n"
         "⚡ <b>File URL Mode Active</b>\n"
-        "📊 <b>Bulk Mode:</b> Caption -> Group | No caption -> Separate\n\n"
+        "📊 <b>Bulk Mode:</b> Caption → Group | No caption → Separate\n\n"
         "🎬 Shuru karne ke liye /post ya /bulk use karo!",
         parse_mode='HTML'
     )
@@ -1031,9 +1053,11 @@ async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⚡ <b>Single Post Mode!</b>\n\n"
         "✂️ Sabse pehle <b>TRIM/PREVIEW</b> bhejo:\n"
-        "  • 📹 Choti trimmed video\n"
+        "  • 📹 Choti trimmed video (RECOMMENDED)\n"
         "  • 🖼️ Ya koi image/photo\n"
-        "  • ⏭️ Ya <code>/skip</code>\n\n"
+        "  • ⏭️ Ya <code>/skip</code> (thumbnail auto-use hoga)\n\n"
+        "💡 <b>Tip:</b> Trim video bhejoge toh free channel mein\n"
+        "  wahi choti video dikhegi, full video nahi!\n\n"
         "❌ Cancel: /cancel",
         parse_mode='HTML'
     )
@@ -1048,8 +1072,11 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg.text and msg.text.strip().lower() == '/skip':
         context.user_data['trim_type'] = 'skip'
         context.user_data['trim_file_id'] = None
+        context.user_data['trim_chat_id'] = None
+        context.user_data['trim_msg_id'] = None
         await msg.reply_text(
-            "⏭️ <b>Skipped!</b>\n\n"
+            "⏭️ <b>Trim Skipped!</b>\n\n"
+            "📌 Free channel mein thumbnail/poster use hoga.\n\n"
             "🔞 Ab <b>FULL VIDEO(s)</b> bhejo.\n"
             "📊 Multiple qualities? Sab bhejo, phir <code>/done</code>\n\n"
             "⚠️ Duplicate = same file size → rejected\n"
@@ -1068,48 +1095,59 @@ async def get_trim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("🔄 Reset! Use /post to start again.")
         return ConversationHandler.END
 
+    # 📸 PHOTO
     if msg.photo:
         context.user_data['trim_type'] = 'photo'
         context.user_data['trim_file_id'] = msg.photo[-1].file_id
+        context.user_data['trim_chat_id'] = msg.chat_id
+        context.user_data['trim_msg_id'] = msg.message_id
         context.user_data['original_html'] = msg.caption_html
         raw_caption = msg.caption if msg.caption else ""
         cleaned_title = clean_title(raw_caption)
         if cleaned_title != "Exclusive Premium Content":
             context.user_data['title'] = cleaned_title
 
-        logger.info(f"Trim photo saved: file_id={msg.photo[-1].file_id[:30]}...")
         await msg.reply_text(
             f"✅ <b>Preview Image Saved!</b>\n\n"
-            f"📝 Title: {html_escape(cleaned_title)}\n\n"
-            "🔞 Ab <b>FULL VIDEO(s)</b> bhejo.\n"
-            "📊 Multiple qualities? Sab bhejo, phir <code>/done</code>\n\n"
+            f"📝 Title: {html_escape(cleaned_title)}\n"
+            f"📌 Free channel mein yeh photo dikhega.\n\n"
+            "🔞 Ab <b>FULL VIDEO(s)</b> bhejo, phir <code>/done</code>\n"
             "❌ Cancel: /cancel",
             parse_mode='HTML'
         )
         return WAIT_FULL
 
+    # 📹 VIDEO / 🎞️ ANIMATION / 📄 DOCUMENT
     if msg.video or msg.document or msg.animation:
         raw_caption = msg.caption if msg.caption else ""
         cleaned_title = clean_title(raw_caption)
         if cleaned_title != "Exclusive Premium Content":
             context.user_data['title'] = cleaned_title
-
         context.user_data['original_html'] = msg.caption_html
+
+        # 🔥 IMPORTANT: chat_id aur msg_id save karo copy_message ke liye
+        context.user_data['trim_chat_id'] = msg.chat_id
+        context.user_data['trim_msg_id'] = msg.message_id
 
         if msg.video:
             context.user_data['trim_type'] = 'video'
             context.user_data['trim_file_id'] = msg.video.file_id
-            logger.info(f"Trim video saved: file_id={msg.video.file_id[:30]}...")
+            media_info = f"📹 Video | Duration: {format_duration(msg.video.duration)}"
         elif msg.animation:
             context.user_data['trim_type'] = 'animation'
             context.user_data['trim_file_id'] = msg.animation.file_id
+            media_info = "🎞️ Animation/GIF"
         else:
             context.user_data['trim_type'] = 'document'
             context.user_data['trim_file_id'] = msg.document.file_id
+            media_info = f"📄 Document | {msg.document.file_name or 'Unknown'}"
 
         await msg.reply_text(
-            f"✅ <b>Trim Video Saved!</b>\n\n"
-            f"📝 Title: {html_escape(cleaned_title)}\n\n"
+            f"✅ <b>Trim/Preview Saved!</b>\n\n"
+            f"📝 Title: {html_escape(cleaned_title)}\n"
+            f"📌 Type: {media_info}\n\n"
+            "✨ <b>Yeh choti trim video free channel mein post hogi!</b>\n"
+            "   (Full video nahi, sirf yeh preview)\n\n"
             "🔞 Ab <b>FULL VIDEO(s)</b> bhejo, phir <code>/done</code>\n\n"
             "⚠️ <b>Note:</b> Trim video sirf preview ke liye hai.\n"
             "📹 Ab actual FULL quality videos bhejo!\n\n"
@@ -1175,11 +1213,10 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     full_videos = context.user_data.get('full_videos', [])
     for existing in full_videos:
         if existing['file_size'] == file_size and file_size > 0:
-            existing_size_str = format_file_size(existing['file_size'])
             await msg.reply_text(
                 f"⚠️ <b>Duplicate detected!</b>\n\n"
                 f"📦 File size <b>{format_file_size(file_size)}</b> already exists "
-                f"as <b>{existing['quality_label']}</b> ({existing_size_str})\n\n"
+                f"as <b>{existing['quality_label']}</b> ({format_file_size(existing['file_size'])})\n\n"
                 f"📹 Same size = same file. Different quality bhejo ya /done",
                 parse_mode='HTML'
             )
@@ -1199,7 +1236,6 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['full_videos'] = full_videos
 
     count = len(full_videos)
-    size_str = format_file_size(file_size)
     quality_list = "\n".join(
         [f"  {i + 1}. {v['quality_label']} ({format_file_size(v['file_size'])})"
          for i, v in enumerate(full_videos)]
@@ -1208,8 +1244,8 @@ async def get_full_and_process(update: Update, context: ContextTypes.DEFAULT_TYP
     await msg.reply_text(
         f"✅ <b>Video #{count} Added!</b>\n\n"
         f"📊 Quality: <b>{quality_label}</b>\n"
-        f"💾 Size: {size_str}\n"
-        f"⏱️ Duration: {duration}s\n\n"
+        f"💾 Size: {format_file_size(file_size)}\n"
+        f"⏱️ Duration: {format_duration(duration)}\n\n"
         f"📋 <b>All Qualities:</b>\n{quality_list}\n\n"
         f"📹 Aur bhejo ya <code>/done</code> likho\n❌ Cancel: /cancel",
         parse_mode='HTML'
@@ -1223,11 +1259,15 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     title = context.user_data.get('title', 'Exclusive Premium Content')
     trim_type = context.user_data.get('trim_type', 'skip')
     trim_file_id = context.user_data.get('trim_file_id')
+    trim_chat_id = context.user_data.get('trim_chat_id')
+    trim_msg_id = context.user_data.get('trim_msg_id')
 
     total = len(full_videos)
     status = await msg.reply_text(f"⏳ Processing {total} quality(ies)...")
 
-    # Database entry
+    # ==========================================
+    # DATABASE: Create video entry
+    # ==========================================
     conn = None
     vid_id = None
     try:
@@ -1248,13 +1288,13 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     qualities_info = [{'label': v['quality_label'], 'size': format_file_size(v['file_size']), 'url': None} for v in full_videos]
     original_html = context.user_data.get('original_html')
 
-    # 🔥 PREMIUM CAPTION LOGIC FOR /POST 🔥
+    # ==========================================
+    # BUILD CAPTIONS
+    # ==========================================
     if original_html:
         free_caption = clean_free_channel_caption(original_html)
         if free_caption:
-            # ✅ Quote formatting with qualities
             quality_text = " | ".join([q['label'] for q in qualities_info]) if qualities_info else "HD Quality"
-            
             free_caption = (
                 f"<blockquote>{free_caption}</blockquote>\n\n"
                 f"<blockquote><b>📊 Available Qualities:</b> {quality_text}</blockquote>\n\n"
@@ -1265,54 +1305,58 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         free_caption = build_free_channel_caption(title, qualities_info)
 
-    # Backup channels caption (plain, no quotes)
-    file_channel_caption = f"{free_caption}\n\n👇 <b>Full Videos in All Qualities Below</b> 👇"
+    backup_channel_caption = f"{free_caption}\n\n👇 <b>Full Videos in All Qualities Below</b> 👇"
 
-    # Rest of the code continues...
+    # ==========================================
+    # BACKUP/PAID CHANNELS: Sticker + Preview + Full Videos
+    # ==========================================
     file_channels = [ch for ch in [BACKUP_1, BACKUP_2, PAID_CH] if ch != 0]
-    
-    # Sticker posting
-    sticker_chat_id = -1003576065127 
-    sticker_msg_id = 344
 
     for ch in file_channels:
+        # Sticker
         try:
-            await context.bot.copy_message(chat_id=ch, from_chat_id=int(sticker_chat_id), message_id=int(sticker_msg_id))
+            await context.bot.copy_message(
+                chat_id=ch, from_chat_id=STICKER_CHAT_ID, message_id=STICKER_MSG_ID
+            )
         except Exception as e:
             logger.error(f"❌ Sticker copy failed to {ch}: {e}")
 
-        # Preview/trim posting
+        # Preview/Trim
         try:
             if trim_type != 'skip' and trim_file_id:
-                if trim_type == 'photo':
-                    await send_photo_with_caption_safe(context, ch, trim_file_id, file_channel_caption)
-                elif trim_type == 'video':
-                    await send_video_with_caption_safe(context, ch, trim_file_id, file_channel_caption)
-                # ... other trim types ...
+                # 🔥 FIX: send_trim_preview use karo - yeh ACTUAL trim video bhejega
+                await send_trim_preview(
+                    context, ch, trim_type, trim_file_id,
+                    trim_chat_id, trim_msg_id,
+                    backup_channel_caption
+                )
             else:
+                # No trim → thumbnail bhejo
                 thumb_id = full_videos[0].get('thumb_id')
                 if thumb_id:
-                    await send_thumbnail_as_photo(context, ch, thumb_id, file_channel_caption)
+                    await send_thumbnail_as_photo(context, ch, thumb_id, backup_channel_caption)
                 else:
-                    await context.bot.send_message(chat_id=ch, text=file_channel_caption, parse_mode='HTML')
+                    await context.bot.send_message(chat_id=ch, text=backup_channel_caption, parse_mode='HTML')
         except Exception as e:
             logger.error(f"❌ Preview post failed to {ch}: {e}")
 
-    # Upload videos and save to DB
+    # ==========================================
+    # UPLOAD FULL VIDEOS TO BACKUP CHANNELS
+    # ==========================================
     failed_qualities = []
     for idx, vdata in enumerate(full_videos):
         q_label = vdata['quality_label']
         await status.edit_text(f"⏳ Uploading {idx + 1}/{total}: {q_label}...")
 
-        backup_caption = ""  # Empty for backup channels
         file_url = None
-        
+
+        # Upload to BACKUP_1
         try:
             copied_msg = await context.bot.copy_message(
-                chat_id=BACKUP_1, 
+                chat_id=BACKUP_1,
                 from_chat_id=vdata['chat_id'],
-                message_id=vdata['msg_id'], 
-                caption=backup_caption
+                message_id=vdata['msg_id'],
+                caption=""
             )
             file_url = construct_file_url(BACKUP_1, copied_msg.message_id)
         except Exception as e:
@@ -1324,15 +1368,15 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         for ch_id in [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]:
             try:
                 await context.bot.copy_message(
-                    chat_id=ch_id, 
+                    chat_id=ch_id,
                     from_chat_id=vdata['chat_id'],
-                    message_id=vdata['msg_id'], 
-                    caption=backup_caption
+                    message_id=vdata['msg_id'],
+                    caption=""
                 )
             except:
                 pass
 
-        # Save to DB
+        # Save to database
         conn2 = None
         try:
             conn2 = get_db_connection()
@@ -1357,7 +1401,9 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.clear()
         return ConversationHandler.END
 
-    # FREE CHANNEL posting
+    # ==========================================
+    # 🔥 FREE CHANNEL: TRIM VIDEO POST (FIXED!)
+    # ==========================================
     bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
     bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
     buy_link = f"https://t.me/{bot_username}?start=buy"
@@ -1370,51 +1416,85 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     if FREE_CH != 0:
         posted_successfully = False
 
+        # ✅ STEP 1: Agar trim hai toh TRIM BHEJO (VIDEO/PHOTO/ANIMATION/DOCUMENT)
         if trim_type != 'skip' and trim_file_id:
-            if trim_type == 'photo':
-                result = await send_photo_with_caption_safe(context, FREE_CH, trim_file_id, free_caption, post_keyboard, has_spoiler=False)
-                if result: posted_successfully = True
-            # ... other trim types ...
+            result = await send_trim_preview(
+                context, FREE_CH, trim_type, trim_file_id,
+                trim_chat_id, trim_msg_id,
+                free_caption, post_keyboard, has_spoiler=False
+            )
+            if result:
+                posted_successfully = True
+                logger.info(f"✅ Trim {trim_type} posted to FREE channel!")
 
+        # ✅ STEP 2: Agar trim skip tha ya fail hua → Thumbnail use karo
         if not posted_successfully:
             thumb_id = full_videos[0].get('thumb_id')
-            
-            if thumb_id:
-                result = await send_thumbnail_as_photo(context, FREE_CH, thumb_id, free_caption, post_keyboard, has_spoiler=True)
-                if result: posted_successfully = True
 
+            if thumb_id:
+                result = await send_thumbnail_as_photo(
+                    context, FREE_CH, thumb_id, free_caption,
+                    post_keyboard, has_spoiler=True
+                )
+                if result:
+                    posted_successfully = True
+                    logger.info("✅ Thumbnail posted to FREE channel (trim was skipped)")
+
+            # ✅ STEP 3: Placeholder thumbnail
             if not posted_successfully:
                 placeholder = await create_placeholder_thumbnail(title)
                 if placeholder:
-                    result = await send_photo_with_caption_safe(context, FREE_CH, placeholder, free_caption, post_keyboard, has_spoiler=True)
-                    if result: posted_successfully = True
+                    result = await send_photo_with_caption_safe(
+                        context, FREE_CH, placeholder, free_caption,
+                        post_keyboard, has_spoiler=True
+                    )
+                    if result:
+                        posted_successfully = True
 
+                # ✅ STEP 4: Text fallback
                 if not posted_successfully:
                     try:
                         text_caption = free_caption if len(free_caption) <= MESSAGE_TEXT_LIMIT else free_caption[:MESSAGE_TEXT_LIMIT - 10] + "…"
-                        await context.bot.send_message(chat_id=FREE_CH, text=text_caption, parse_mode='HTML', reply_markup=post_keyboard)
-                    except:
-                        pass
+                        await context.bot.send_message(
+                            chat_id=FREE_CH, text=text_caption,
+                            parse_mode='HTML', reply_markup=post_keyboard
+                        )
+                        posted_successfully = True
+                    except Exception as e:
+                        logger.error(f"❌ Free channel all attempts failed: {e}")
 
-    # Success message
+    # ==========================================
+    # SUCCESS MESSAGE
+    # ==========================================
     q_str = ", ".join([f"{q['label']}({q['size']})" for q in qualities_info])
     fail_str = f"\n⚠️ Failed: {', '.join(failed_qualities)}" if failed_qualities else ""
-    post_type_msg = "📸 Photo/Preview" if trim_type != 'skip' else "📹 Thumbnail/Text"
     
+    post_type_icons = {
+        'video': '📹 Trim Video',
+        'photo': '📸 Photo',
+        'animation': '🎞️ Animation',
+        'document': '📄 Document',
+        'skip': '🖼️ Thumbnail/Placeholder'
+    }
+    post_type_msg = post_type_icons.get(trim_type, '📌 Unknown')
+
     await status.edit_text(
         f"✅ <b>SUCCESS!</b>\n\n"
-        f"📝 {generate_display_title(title)}\n"
+        f"📝 {html_escape(generate_display_title(title))}\n"
+        f"🆔 Video ID: {vid_id}\n"
         f"📊 Qualities: {q_str}{fail_str}\n"
         f"🔗 Link: {bot_link}\n\n"
-        f"{post_type_msg} posted in free channel ✅",
+        f"📌 Free Channel: {post_type_msg} posted ✅",
         parse_mode='HTML'
     )
-    
+
     context.user_data.clear()
     return ConversationHandler.END
 
 
-# ========== BULK UPLOAD ==========
+# ================================================================
+#               BULK UPLOAD (ENHANCED)
+# ================================================================
 
 async def start_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
@@ -1429,10 +1509,13 @@ async def start_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['bulk_videos'] = {}
     context.user_data['no_caption_counter'] = 0
     await update.message.reply_text(
-        "📦 <b>BULK UPLOAD MODE (with caption grouping)</b>\n\n"
-        "📹 Videos / Documents bhejte jao (forwarded ya direct).\n"
-        "📝 <b>Caption present?</b> → Grouped by caption (multiple qualities)\n"
-        "📝 <b>No caption?</b> → Each file becomes a separate video\n\n"
+        "📦 <b>BULK UPLOAD MODE (Enhanced v3.0)</b>\n\n"
+        "📹 Videos / Documents bhejte jao (forwarded ya direct).\n\n"
+        "📝 <b>Caption present?</b> → Same caption = Grouped (multiple qualities)\n"
+        "📝 <b>No caption?</b> → Each file = Separate video\n\n"
+        "💡 <b>Tip:</b> Bulk mode mein first video ka thumbnail\n"
+        "   free channel mein poster ke roop mein jaata hai.\n"
+        "   Full video NAHI jaata!\n\n"
         "✅ Sab bhejo, phir <code>/done</code>\n"
         "❌ Cancel: /cancel",
         parse_mode='HTML'
@@ -1553,10 +1636,6 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
     results = []
     bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
     buy_link = f"https://t.me/{bot_username}?start=buy"
-
-    # Sticker settings
-    sticker_chat_id = -1003576065127
-    sticker_msg_id = 344
     file_channels = [ch for ch in [BACKUP_1, BACKUP_2, PAID_CH] if ch != 0]
 
     for title, video_list in bulk_videos.items():
@@ -1566,9 +1645,7 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode='HTML'
         )
 
-        # ==========================================
         # DATABASE: Create video entry
-        # ==========================================
         conn = None
         vid_id = None
         try:
@@ -1586,53 +1663,42 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             if conn:
                 db_pool.putconn(conn)
 
-        # ==========================================
-        # BACKUP/PAID CHANNELS: Sticker + Videos
-        # ==========================================
+        # BACKUP/PAID CHANNELS: Sticker
         for ch in file_channels:
             try:
-                logger.info(f"Bulk: Copying sticker to {ch} for '{title}'")
                 await context.bot.copy_message(
-                    chat_id=ch, 
-                    from_chat_id=int(sticker_chat_id), 
-                    message_id=int(sticker_msg_id)
+                    chat_id=ch,
+                    from_chat_id=STICKER_CHAT_ID,
+                    message_id=STICKER_MSG_ID
                 )
-                logger.info(f"✅ Bulk: Sticker posted to {ch}")
             except Exception as e:
                 logger.error(f"❌ Bulk: Sticker failed for {ch}: {e}")
 
-        # ==========================================
         # UPLOAD VIDEOS TO BACKUP CHANNELS
-        # ==========================================
         qualities_info = []
         for vdata in video_list:
             q_label = vdata['quality_label']
-            backup_caption = ""  # Empty caption
-
             file_url = None
-            
-            # Upload to BACKUP_1
+
             try:
                 copied = await context.bot.copy_message(
-                    chat_id=BACKUP_1, 
+                    chat_id=BACKUP_1,
                     from_chat_id=vdata['chat_id'],
-                    message_id=vdata['msg_id'], 
-                    caption=backup_caption
+                    message_id=vdata['msg_id'],
+                    caption=""
                 )
                 file_url = construct_file_url(BACKUP_1, copied.message_id)
-                logger.info(f"✅ Bulk: {q_label} uploaded to BACKUP_1")
             except Exception as e:
                 logger.error(f"❌ Bulk: Backup1 FAILED {title} {q_label}: {e}")
                 continue
 
-            # Copy to other channels
             for ch_id in [ch for ch in [BACKUP_2, PAID_CH] if ch != 0]:
                 try:
                     await context.bot.copy_message(
-                        chat_id=ch_id, 
+                        chat_id=ch_id,
                         from_chat_id=vdata['chat_id'],
-                        message_id=vdata['msg_id'], 
-                        caption=backup_caption
+                        message_id=vdata['msg_id'],
+                        caption=""
                     )
                 except Exception as e:
                     logger.error(f"❌ Bulk: Channel {ch_id} error: {e}")
@@ -1668,17 +1734,16 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
             continue
 
         # ==========================================
-        # FREE CHANNEL: Post with caption + buttons
+        # 🔥 FREE CHANNEL: THUMBNAIL POSTER (NOT FULL VIDEO!)
         # ==========================================
         bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
         post_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📥 Watch Now / Download 📥", url=bot_link)],
             [InlineKeyboardButton("💎 Buy VIP Subscription", url=buy_link)]
         ])
-        
-        # 🔥 PREMIUM CAPTION LOGIC 🔥
+
+        # Build caption
         original_html = next((v.get('original_html') for v in video_list if v.get('original_html')), None)
-        
         if original_html:
             free_caption = clean_free_channel_caption(original_html)
             if free_caption:
@@ -1693,46 +1758,57 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             caption = build_free_channel_caption(title, qualities_info)
 
-        # ✅ CORRECT INDENTATION - Yeh function ke andar hai
+        # 🔥 POST TO FREE CHANNEL (ONLY THUMBNAIL, NOT FULL VIDEO!)
         if FREE_CH != 0:
             posted = False
             first_vid = video_list[0]
             thumb_id = first_vid.get('thumb_id')
 
+            # ✅ OPTION 1: Enhanced Thumbnail as Photo
             if thumb_id:
                 result = await send_thumbnail_as_photo(
-                    context, FREE_CH, thumb_id, caption, post_keyboard, has_spoiler=True
+                    context, FREE_CH, thumb_id, caption,
+                    post_keyboard, has_spoiler=True
                 )
                 if result:
                     posted = True
-                    logger.info(f"✅ Bulk: Thumbnail posted to FREE channel for '{title}'")
+                    logger.info(f"✅ Bulk: Thumbnail poster posted for '{title}'")
 
+            # ✅ OPTION 2: Placeholder Thumbnail
+            if not posted:
+                placeholder = await create_placeholder_thumbnail(title)
+                if placeholder:
+                    result = await send_photo_with_caption_safe(
+                        context, FREE_CH, placeholder, caption,
+                        post_keyboard, has_spoiler=True
+                    )
+                    if result:
+                        posted = True
+                        logger.info(f"✅ Bulk: Placeholder poster posted for '{title}'")
+
+            # ✅ OPTION 3: Text Fallback
             if not posted:
                 try:
                     text_caption = caption if len(caption) <= MESSAGE_TEXT_LIMIT else caption[:MESSAGE_TEXT_LIMIT - 10] + "…"
                     await context.bot.send_message(
-                        chat_id=FREE_CH,
-                        text=text_caption,
-                        parse_mode='HTML',
-                        reply_markup=post_keyboard
+                        chat_id=FREE_CH, text=text_caption,
+                        parse_mode='HTML', reply_markup=post_keyboard
                     )
-                    logger.info(f"✅ Bulk: Text post to FREE channel for '{title}'")
+                    logger.info(f"✅ Bulk: Text post for '{title}'")
                 except Exception as e:
                     logger.error(f"❌ Bulk: Free channel text failed: {e}")
                     try:
                         safe_caption = make_short_photo_caption(title, qualities_info)
                         await context.bot.send_message(
-                            chat_id=FREE_CH,
-                            text=safe_caption,
-                            parse_mode='HTML',
-                            reply_markup=post_keyboard
+                            chat_id=FREE_CH, text=safe_caption,
+                            parse_mode='HTML', reply_markup=post_keyboard
                         )
                     except Exception as last_e:
                         logger.error(f"❌ Bulk: All free channel attempts failed: {last_e}")
 
         q_str = ", ".join([f"{q['label']}({q['size']})" for q in qualities_info])
         results.append(f"✅ {generate_display_title(title)}: {q_str}")
-        
+
         # Small delay between video groups
         await asyncio.sleep(1)
 
@@ -1754,6 +1830,66 @@ async def cancel_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================================================================
+#              ADMIN STATS COMMAND (NEW!)
+# ================================================================
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin ke liye bot statistics dikhao"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ Access Denied!")
+        return
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT COUNT(*) FROM adult_videos")
+        total_videos = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM video_qualities")
+        total_qualities = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM subscribers")
+        total_users = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM subscribers WHERE end_date > NOW()")
+        active_subs = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM subscribers WHERE end_date <= NOW() AND end_date > NOW() - INTERVAL '30 days'")
+        expired_subs = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM auto_delete_queue")
+        pending_deletes = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM adult_videos WHERE created_at > NOW() - INTERVAL '24 hours'")
+        today_videos = cur.fetchone()[0]
+
+        cur.close()
+
+        await update.message.reply_text(
+            "📊 <b>Bot Statistics</b>\n\n"
+            f"🎬 <b>Videos:</b>\n"
+            f"  • Total: {total_videos}\n"
+            f"  • Qualities: {total_qualities}\n"
+            f"  • Today: {today_videos}\n\n"
+            f"👥 <b>Users:</b>\n"
+            f"  • Total: {total_users}\n"
+            f"  • Active VIP: {active_subs}\n"
+            f"  • Expired (30d): {expired_subs}\n\n"
+            f"🗑️ <b>Pending Deletes:</b> {pending_deletes}\n\n"
+            f"⏰ <b>Auto-Delete Time:</b> {AUTO_DELETE_TIME}s\n"
+            f"📝 <b>Text Delete Time:</b> {TEXT_DELETE_TIME}s",
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Stats error: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+
+# ================================================================
 #           PROVIDER BOT (USER-FACING)
 # ================================================================
 
@@ -1770,9 +1906,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"Provider /start from user {user.id} ({user_name}): {text}")
 
-    # ==========================================
-    # NEW: Update User Info silently in Database
-    # ==========================================
+    # Update User Info silently in Database
     conn = None
     try:
         conn = get_db_connection()
@@ -1780,7 +1914,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.execute("""
             INSERT INTO subscribers (user_id, username, first_name)
             VALUES (%s, %s, %s)
-            ON CONFLICT (user_id) 
+            ON CONFLICT (user_id)
             DO UPDATE SET username = EXCLUDED.username, first_name = EXCLUDED.first_name
         """, (user.id, user.username, user_name))
         conn.commit()
@@ -1790,12 +1924,13 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if conn:
             db_pool.putconn(conn)
-    # ==========================================
 
+    # Handle buy deeplink
     if text and "buy" in text:
         await provider_handle_buy(update, context)
         return
 
+    # Handle video deeplink
     if text and "vid_" in text:
         try:
             vid_id = int(text.split("vid_")[1])
@@ -1823,7 +1958,9 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not title:
                 err = await update.message.reply_text(
-                    "❌ Video Not Found!\n\nYeh video delete ho chuki hai ya invalid link hai."
+                    "❌ <b>Video Not Found!</b>\n\n"
+                    "Yeh video delete ho chuki hai ya invalid link hai.",
+                    parse_mode='HTML'
                 )
                 asyncio.create_task(schedule_delete(context, chat_id, err.message_id, TEXT_DELETE_TIME))
                 asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, TEXT_DELETE_TIME))
@@ -1838,15 +1975,21 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             asyncio.create_task(schedule_delete(context, chat_id, update.message.message_id, 5))
 
+            # Info message
+            quality_list = "\n".join([
+                f"  • {q[1]} ({format_file_size(q[3])})" for q in qualities
+            ])
             selection_msg = await update.message.reply_text(
                 f"👋 Hello <b>{html_escape(user_name)}</b>!\n\n"
-                f"🎬 <b>{html_escape(title)}</b>\n\n"
-                f"⚠️ Videos auto-delete after 5 minutes!\n"
-                f"💾 Forward to Saved Messages immediately!",
+                f"🎬 <b>{html_escape(generate_display_title(title))}</b>\n\n"
+                f"📊 <b>Available Qualities:</b>\n{quality_list}\n\n"
+                f"⚠️ Videos <b>{AUTO_DELETE_TIME // 60} min</b> mein auto-delete ho jayengi!\n"
+                f"💾 Jaldi se <b>Saved Messages</b> mein forward kar lo!",
                 parse_mode='HTML'
             )
             asyncio.create_task(schedule_delete(context, chat_id, selection_msg.message_id, TEXT_DELETE_TIME))
 
+            # Send all qualities
             all_sent_ids = []
             for quality in qualities:
                 msg_ids = await send_video_to_user(
@@ -1876,6 +2019,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(schedule_delete(context, chat_id, err.message_id, TEXT_DELETE_TIME))
         return
 
+    # Normal /start - Welcome message
     sub_status = ""
     is_active, end_date = check_active_subscription(user.id)
     if is_active and end_date:
@@ -1900,6 +2044,7 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📌 <b>Features:</b>\n"
         f"  • Direct video files without ads\n"
         f"  • All qualities available\n"
+        f"  • Auto-delete for privacy\n"
         f"  • Priority support"
         f"{sub_status}\n\n"
         f"👇 Neeche menu se option select karein:",
@@ -2257,13 +2402,19 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     elif text == "🆓 Free Channel":
-        info_msg = await msg.reply_text(f"🆓 Join our Free Channel here:\n👉 {FREE_CHANNEL_LINK}")
+        info_msg = await msg.reply_text(
+            f"🆓 <b>Join our Free Channel:</b>\n👉 {FREE_CHANNEL_LINK}",
+            parse_mode='HTML'
+        )
         asyncio.create_task(schedule_delete(context, chat_id, info_msg.message_id, TEXT_DELETE_TIME))
         asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
         return
 
     elif text == "👨‍💻 Contact Admin":
-        info_msg = await msg.reply_text(f"👨‍💻 Admin se yahan baat karein:\n👉 @{ADMIN_USERNAME}")
+        info_msg = await msg.reply_text(
+            f"👨‍💻 Admin se yahan baat karein:\n👉 @{ADMIN_USERNAME}",
+            parse_mode='HTML'
+        )
         asyncio.create_task(schedule_delete(context, chat_id, info_msg.message_id, TEXT_DELETE_TIME))
         asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
         return
@@ -2357,7 +2508,7 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ================================================================
-#   SEND VIDEO TO USER
+#   SEND VIDEO TO USER (ENHANCED)
 # ================================================================
 
 async def send_video_to_user(update, context, chat_id, user_name, title,
@@ -2381,8 +2532,8 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
                 reply_markup=join_keyboard, supports_streaming=True
             )
             sent_msg_id = fallback.message_id
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Old file_id send failed: {e}")
     else:
         backup_channel_id, backup_msg_id = parse_file_url(file_url)
         if backup_channel_id and backup_msg_id:
@@ -2393,8 +2544,8 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
                     reply_markup=join_keyboard
                 )
                 sent_msg_id = copied.message_id
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"Copy message failed for user {chat_id}: {e}")
 
     if sent_msg_id and not return_msg_id:
         asyncio.create_task(
@@ -2410,6 +2561,7 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
 # ================= BACKGROUND TASKS =================
 
 async def periodic_cleanup(context):
+    """Purane records saaf karo periodically"""
     while True:
         await asyncio.sleep(3600)
         conn = None
@@ -2418,10 +2570,15 @@ async def periodic_cleanup(context):
             cur = conn.cursor()
             cur.execute("DELETE FROM adult_videos WHERE created_at < NOW() - INTERVAL '7 days'")
             deleted = cur.rowcount
+            
+            # Purane delete queue entries bhi saaf karo
+            cur.execute("DELETE FROM auto_delete_queue WHERE delete_at < NOW() - INTERVAL '1 hour'")
+            cleaned_queue = cur.rowcount
+            
             conn.commit()
             cur.close()
-            if deleted > 0:
-                logger.info(f"Cleaned {deleted} old records")
+            if deleted > 0 or cleaned_queue > 0:
+                logger.info(f"🧹 Cleaned: {deleted} old videos, {cleaned_queue} stale queue entries")
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
         finally:
@@ -2429,86 +2586,9 @@ async def periodic_cleanup(context):
                 db_pool.putconn(conn)
 
 
-async def schedule_daily_check(provider_app_instance: Application):
-    """
-    Scheduler that runs checks every night at 2:00 AM IST.
-    WITH IMPROVED LOGGING & ERROR HANDLING
-    """
-    await asyncio.sleep(60)  # Initial delay for bot startup
-    logger.info("=" * 60)
-    logger.info("🕒 SUBSCRIPTION CHECKER STARTED")
-    logger.info("=" * 60)
-    
-    # Test immediate check on startup (for debugging)
-    logger.info("🧪 Running initial test check...")
-    try:
-        await check_expiring_soon(provider_app_instance)
-        await check_expired_subscriptions(provider_app_instance)
-        logger.info("✅ Initial test check completed")
-    except Exception as e:
-        logger.error(f"❌ Initial test check failed: {e}")
-    
-    while True:
-        try:
-            # Get current time in IST (UTC+5:30)
-            from datetime import timezone, timedelta as td
-            ist_tz = timezone(td(hours=5, minutes=30))
-            now_ist = datetime.now(ist_tz)
-            
-            # Target time: 2:00 AM IST
-            target_time = now_ist.replace(hour=2, minute=0, second=0, microsecond=0)
-            
-            # If already past 2 AM today, schedule for tomorrow
-            if now_ist >= target_time:
-                target_time += timedelta(days=1)
-            
-            # Calculate wait time
-            wait_seconds = (target_time - now_ist).total_seconds()
-            hours = int(wait_seconds / 3600)
-            minutes = int((wait_seconds % 3600) / 60)
-            
-            logger.info("⏰ NEXT CHECK SCHEDULED:")
-            logger.info(f"   Time: {target_time.strftime('%d-%m-%Y %H:%M:%S IST')}")
-            logger.info(f"   Wait: {hours}h {minutes}m ({int(wait_seconds)}s)")
-            logger.info("=" * 60)
-            
-            # Wait until target time
-            await asyncio.sleep(wait_seconds)
-            
-            # Run both checks
-            logger.info("=" * 60)
-            logger.info("🔍 RUNNING DAILY SUBSCRIPTION CHECKS")
-            logger.info(f"   Time: {datetime.now(ist_tz).strftime('%d-%m-%Y %H:%M:%S IST')}")
-            logger.info("=" * 60)
-            
-            # Check expiring soon (24h warning)
-            logger.info("⚠️ Checking expiring subscriptions...")
-            await check_expiring_soon(provider_app_instance)
-            
-            # Check already expired
-            logger.info("❌ Checking expired subscriptions...")
-            await check_expired_subscriptions(provider_app_instance)
-            
-            logger.info("=" * 60)
-            logger.info("✅ DAILY CHECK COMPLETED SUCCESSFULLY")
-            logger.info("=" * 60)
-            
-        except Exception as e:
-            logger.error("=" * 60)
-            logger.error(f"❌ SCHEDULER ERROR: {e}")
-            logger.error("=" * 60)
-            import traceback
-            traceback.print_exc()
-            # On error, wait 1 hour before retry
-            logger.info("⏳ Waiting 1 hour before retry...")
-            await asyncio.sleep(3600)
-
 async def persistent_auto_delete_worker(app: Application):
-    """
-    Background worker jo har 10 second me DB check karega, 
-    restart ke time miss hue messages ko delete karega.
-    """
-    await asyncio.sleep(10) # Bot theek se start hone ka wait
+    """Background worker: restart ke baad bhi messages delete karega"""
+    await asyncio.sleep(10)
     logger.info("🧹 Persistent Auto-Delete Worker Started!")
 
     while True:
@@ -2516,25 +2596,22 @@ async def persistent_auto_delete_worker(app: Application):
         try:
             conn = get_db_connection()
             cur = conn.cursor()
-            
-            # Jo messages ka time nikal chuka hai unhe uthao
+
             cur.execute(
                 "SELECT id, chat_id, message_id FROM auto_delete_queue WHERE delete_at <= NOW() LIMIT 50"
             )
             rows = cur.fetchall()
-            
+
             if rows:
                 for row_id, chat_id, msg_id in rows:
                     try:
-                        # Telegram se delete karo
                         await app.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                        logger.info(f"🧹 Worker deleted missed message {msg_id} from {chat_id}")
+                        logger.info(f"🧹 Worker deleted missed msg {msg_id} from {chat_id}")
                     except Exception:
-                        pass # File pehle hi ud chuki hai, ignore karo
-                        
-                    # DB se turant clean karo
+                        pass
+
                     cur.execute("DELETE FROM auto_delete_queue WHERE id = %s", (row_id,))
-                
+
                 conn.commit()
             cur.close()
         except Exception as e:
@@ -2542,21 +2619,58 @@ async def persistent_auto_delete_worker(app: Application):
         finally:
             if conn:
                 db_pool.putconn(conn)
-            
-        # Har 10 second mein DB scan karega
+
         await asyncio.sleep(10)
-        
+
+
+async def schedule_daily_check(provider_app_instance: Application):
+    """Daily subscription check at 2:00 AM IST"""
+    await asyncio.sleep(60)
+    logger.info("🕒 SUBSCRIPTION CHECKER STARTED")
+
+    # Test check on startup
+    try:
+        await check_expiring_soon(provider_app_instance)
+        await check_expired_subscriptions(provider_app_instance)
+        logger.info("✅ Initial test check completed")
+    except Exception as e:
+        logger.error(f"❌ Initial test check failed: {e}")
+
+    while True:
+        try:
+            from datetime import timezone, timedelta as td
+            ist_tz = timezone(td(hours=5, minutes=30))
+            now_ist = datetime.now(ist_tz)
+
+            target_time = now_ist.replace(hour=2, minute=0, second=0, microsecond=0)
+            if now_ist >= target_time:
+                target_time += timedelta(days=1)
+
+            wait_seconds = (target_time - now_ist).total_seconds()
+            logger.info(f"⏰ Next check: {target_time.strftime('%d-%m-%Y %H:%M IST')} ({int(wait_seconds)}s)")
+
+            await asyncio.sleep(wait_seconds)
+
+            logger.info("🔍 RUNNING DAILY SUBSCRIPTION CHECKS")
+            await check_expiring_soon(provider_app_instance)
+            await check_expired_subscriptions(provider_app_instance)
+            logger.info("✅ DAILY CHECK COMPLETED")
+
+        except Exception as e:
+            logger.error(f"❌ SCHEDULER ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+            await asyncio.sleep(3600)
+
+
 async def check_expiring_soon(provider_app_instance: Application):
-    """
-    Check for subscriptions expiring in 1 day and send warnings.
-    WITH IMPROVED LOGGING
-    """
+    """24h mein expire hone wale subscriptions ko warn karo"""
     conn = None
     count = 0
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
+
         cur.execute("""
             SELECT user_id, end_date, first_name FROM subscribers
             WHERE end_date > NOW()
@@ -2564,80 +2678,61 @@ async def check_expiring_soon(provider_app_instance: Application):
             AND expiry_warned = FALSE
         """)
         expiring_users = cur.fetchall()
-        
         logger.info(f"   Found {len(expiring_users)} expiring subscriptions")
 
         for (user_id, end_date, first_name) in expiring_users:
             hours_left = int((end_date - datetime.now()).total_seconds() / 3600)
-            
-            # User ko warning
-            user_msg = (
-                "⚠️ <b>Subscription Expiring Soon!</b>\n\n"
-                f"📅 Expires: {end_date.strftime('%d-%m-%Y %H:%M')}\n"
-                f"⏰ Time Left: ~{hours_left} hours\n\n"
-                "🔁 Renew karne ke liye:\n"
-                "/start → Buy VIP\n\n"
-                f"❓ Help: @{ADMIN_USERNAME}"
-            )
-            
+
             try:
                 await provider_app_instance.bot.send_message(
-                    chat_id=user_id, text=user_msg, parse_mode='HTML'
+                    chat_id=user_id,
+                    text=(
+                        "⚠️ <b>Subscription Expiring Soon!</b>\n\n"
+                        f"📅 Expires: {end_date.strftime('%d-%m-%Y %H:%M')}\n"
+                        f"⏰ Time Left: ~{hours_left} hours\n\n"
+                        "🔁 Renew: /start → Buy VIP\n\n"
+                        f"❓ Help: @{ADMIN_USERNAME}"
+                    ),
+                    parse_mode='HTML'
                 )
-                logger.info(f"   ✅ Warning sent to user {user_id} ({first_name or 'Unknown'})")
                 count += 1
             except Exception as e:
-                logger.error(f"   ❌ Failed to warn user {user_id}: {e}")
-            
-            # Admin ko bhi batao
-            admin_msg = (
-                f"⚠️ <b>USER PLAN EXPIRING SOON</b>\n\n"
-                f"👤 User ID: <code>{user_id}</code>\n"
-                f"👤 Name: {first_name or 'Unknown'}\n"
-                f"📅 Expiry: {end_date.strftime('%d-%m-%Y %H:%M')}\n"
-                f"⏰ Hours Left: ~{hours_left}\n"
-            )
-            
+                logger.error(f"   Failed to warn user {user_id}: {e}")
+
             try:
                 await provider_app_instance.bot.send_message(
-                    chat_id=ADMIN_USER_ID, text=admin_msg, parse_mode='HTML'
+                    chat_id=ADMIN_USER_ID,
+                    text=(
+                        f"⚠️ <b>USER PLAN EXPIRING SOON</b>\n\n"
+                        f"👤 ID: <code>{user_id}</code> | Name: {first_name or 'Unknown'}\n"
+                        f"📅 Expiry: {end_date.strftime('%d-%m-%Y %H:%M')} | Hours: ~{hours_left}"
+                    ),
+                    parse_mode='HTML'
                 )
-                logger.info(f"   ✅ Admin notified about user {user_id}")
-            except Exception as e:
-                logger.error(f"   ❌ Failed to notify admin: {e}")
-            
-            # Mark as warned
+            except:
+                pass
+
             cur.execute("UPDATE subscribers SET expiry_warned = TRUE WHERE user_id = %s", (user_id,))
             conn.commit()
-            
             await asyncio.sleep(2)
 
-        if count > 0:
-            logger.info(f"   ✅ Processed {count} expiring subscriptions")
-        else:
-            logger.info(f"   ℹ️ No expiring subscriptions found")
-        
+        logger.info(f"   ✅ Processed {count} expiring subscriptions")
         cur.close()
     except Exception as e:
         logger.error(f"   ❌ Expiring check error: {e}")
-        import traceback
-        traceback.print_exc()
     finally:
         if conn:
             db_pool.putconn(conn)
 
 
 async def check_expired_subscriptions(provider_app_instance: Application):
-    """
-    Check for subscriptions that have expired and send notifications.
-    WITH IMPROVED LOGGING
-    """
+    """Expired subscriptions ko notify karo"""
     conn = None
     count = 0
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
+
         cur.execute("""
             SELECT user_id, end_date, first_name FROM subscribers
             WHERE end_date <= NOW()
@@ -2645,64 +2740,49 @@ async def check_expired_subscriptions(provider_app_instance: Application):
             AND notified = FALSE
         """)
         expired_users = cur.fetchall()
-        
         logger.info(f"   Found {len(expired_users)} expired subscriptions")
 
         for (user_id, end_date, first_name) in expired_users:
-            # User ko notification
-            user_msg = (
-                "❌ <b>VIP Subscription Expired!</b>\n\n"
-                f"📅 Expired on: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
-                "🎬 Videos access restore karne ke liye renew karein:\n"
-                "/start → Buy VIP\n\n"
-                f"❓ Help: @{ADMIN_USERNAME}"
-            )
-
             try:
                 await provider_app_instance.bot.send_message(
-                    chat_id=user_id, text=user_msg, parse_mode='HTML'
+                    chat_id=user_id,
+                    text=(
+                        "❌ <b>VIP Subscription Expired!</b>\n\n"
+                        f"📅 Expired on: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
+                        "🔁 Renew: /start → Buy VIP\n\n"
+                        f"❓ Help: @{ADMIN_USERNAME}"
+                    ),
+                    parse_mode='HTML'
                 )
-                logger.info(f"   ✅ Expiry notification sent to user {user_id} ({first_name or 'Unknown'})")
                 count += 1
             except Exception as e:
-                logger.error(f"   ❌ Failed to notify user {user_id}: {e}")
-
-            # Admin ko notification
-            admin_msg = (
-                f"🔔 <b>USER PLAN EXPIRED</b>\n\n"
-                f"👤 User ID: <code>{user_id}</code>\n"
-                f"👤 Name: {first_name or 'Unknown'}\n"
-                f"📅 Expired On: {end_date.strftime('%d-%m-%Y %H:%M')}\n\n"
-                f"User ka VIP plan khatam ho chuka hai."
-            )
+                logger.error(f"   Failed to notify user {user_id}: {e}")
 
             try:
                 await provider_app_instance.bot.send_message(
-                    chat_id=ADMIN_USER_ID, text=admin_msg, parse_mode='HTML'
+                    chat_id=ADMIN_USER_ID,
+                    text=(
+                        f"🔔 <b>USER PLAN EXPIRED</b>\n\n"
+                        f"👤 ID: <code>{user_id}</code> | Name: {first_name or 'Unknown'}\n"
+                        f"📅 Expired: {end_date.strftime('%d-%m-%Y %H:%M')}"
+                    ),
+                    parse_mode='HTML'
                 )
-                logger.info(f"   ✅ Admin notified about expired user {user_id}")
-            except Exception as e:
-                logger.error(f"   ❌ Failed to notify admin: {e}")
+            except:
+                pass
 
-            # Mark as notified
             cur.execute("UPDATE subscribers SET notified = TRUE WHERE user_id = %s", (user_id,))
             conn.commit()
-
             await asyncio.sleep(2)
 
-        if count > 0:
-            logger.info(f"   ✅ Processed {count} expired subscriptions")
-        else:
-            logger.info(f"   ℹ️ No expired subscriptions found")
-
+        logger.info(f"   ✅ Processed {count} expired subscriptions")
         cur.close()
     except Exception as e:
         logger.error(f"   ❌ Expired check error: {e}")
-        import traceback
-        traceback.print_exc()
     finally:
         if conn:
             db_pool.putconn(conn)
+
 
 # ============ TESTING COMMAND (ADMIN ONLY) ============
 async def test_expiry_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2710,55 +2790,52 @@ async def test_expiry_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_USER_ID:
         await update.message.reply_text("❌ Admin only!")
         return
-    
+
     status_msg = await update.message.reply_text("🔍 Running manual expiry check...")
-    
-    # Import the provider app reference (we'll fix this below)
-    # For now, use context directly
-    
+
     conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        
-        # Check expiring soon (24h warning)
+
         cur.execute("""
             SELECT user_id, end_date, expiry_warned FROM subscribers
             WHERE end_date > NOW()
             AND end_date <= NOW() + INTERVAL '24 hours'
         """)
         expiring = cur.fetchall()
-        
-        # Check already expired
+
         cur.execute("""
             SELECT user_id, end_date, notified FROM subscribers
             WHERE end_date <= NOW()
             AND end_date > NOW() - INTERVAL '7 days'
         """)
         expired = cur.fetchall()
-        
+
         cur.close()
-        
+
         result_text = f"📊 <b>Manual Check Results:</b>\n\n"
         result_text += f"⚠️ <b>Expiring Soon (24h):</b> {len(expiring)}\n"
         for (uid, edate, warned) in expiring:
             hours = int((edate - datetime.now()).total_seconds() / 3600)
             result_text += f"  • User {uid}: {hours}h left (warned={warned})\n"
-        
+
         result_text += f"\n❌ <b>Expired:</b> {len(expired)}\n"
         for (uid, edate, notif) in expired:
             result_text += f"  • User {uid}: {edate.strftime('%d-%m-%Y')} (notified={notif})\n"
-        
+
         if not expiring and not expired:
             result_text += "\n✅ No subscriptions need notifications right now."
-        
+
         await status_msg.edit_text(result_text, parse_mode='HTML')
-        
+
     except Exception as e:
         await status_msg.edit_text(f"❌ Error: {e}")
     finally:
         if conn:
             db_pool.putconn(conn)
+
+
 # ================================================================
 #                   RUN BOTH BOTS
 # ================================================================
@@ -2825,6 +2902,7 @@ async def run_bots():
     main_app.add_handler(bulk_conv)
     main_app.add_handler(CommandHandler('start', admin_start))
     main_app.add_handler(CommandHandler('check_expiry', test_expiry_check))
+    main_app.add_handler(CommandHandler('stats', admin_stats))
     print("✅ Main Bot handlers configured")
 
     # ============ PROVIDER BOT ============
@@ -2854,21 +2932,25 @@ async def run_bots():
         print("✅ Provider Bot RUNNING!")
 
         print("\n" + "=" * 60)
-        print("🎉 BOTH BOTS RUNNING SUCCESSFULLY!")
+        print("🎉 BOTH BOTS RUNNING SUCCESSFULLY! v3.0 Enhanced")
         print("=" * 60)
         print(f"👤 Admin User ID: {ADMIN_USER_ID}")
         print(f"🤖 Provider Bot: @{PROVIDER_BOT_USERNAME}")
         print(f"📦 Backup Channel: {BACKUP_1}")
+        print(f"🆓 Free Channel: {FREE_CH}")
+        print(f"💎 Paid Channel: {PAID_CH}")
         print(f"🕒 Video Auto-Delete: {AUTO_DELETE_TIME}s")
+        print(f"📝 Text Delete: {TEXT_DELETE_TIME}s")
+        print(f"🖼️ PIL Available: {PIL_AVAILABLE}")
+        print(f"📱 QR Available: {QR_AVAILABLE}")
         print("=" * 60)
 
-        # 👇 YAHAN HONGE BACKGROUND TASKS START 👇
+        # Background tasks
         print("\n🔄 Starting background tasks...")
         asyncio.create_task(periodic_cleanup(None))
         asyncio.create_task(schedule_daily_check(provider_app))
         asyncio.create_task(persistent_auto_delete_worker(provider_app))
-        print("✅ Background tasks started (Cleanup, Subscription Checker, Persistent Worker)")
-
+        print("✅ Background tasks started")
         print("\n✨ System ready! Waiting for commands...\n")
 
         while True:
@@ -2900,21 +2982,18 @@ async def run_bots():
 
 if __name__ == '__main__':
     print("\n" + "=" * 60)
-    print("🔍 PRE-FLIGHT CHECKS")
+    print("🔍 PRE-FLIGHT CHECKS v3.0")
     print("=" * 60)
 
     required = ['MAIN_BOT_TOKEN', 'PROVIDER_BOT_TOKEN', 'DATABASE_URL']
     missing = [v for v in required if not os.environ.get(v)]
     if missing:
         print(f"❌ ERROR: Missing environment variables: {', '.join(missing)}")
-        print("\n📝 Set these in Render dashboard → Environment tab")
         exit(1)
     print("✅ Required environment variables present")
 
     if BACKUP_1 == 0:
         print("❌ ERROR: BACKUP_CHANNEL_1 is REQUIRED!")
-        print("\n📝 Set BACKUP_CHANNEL_1 env variable (e.g. -1002683355160)")
-        print("⚠️  Both bots must be admin of this channel!")
         exit(1)
     print(f"✅ Backup channel configured: {BACKUP_1}")
 
@@ -2925,7 +3004,6 @@ if __name__ == '__main__':
         print("✅ Database ready")
     except Exception as e:
         print(f"❌ DATABASE ERROR: {e}")
-        logger.error(f"DB init failed: {e}", exc_info=True)
         exit(1)
 
     print("\n🌐 Starting web server...")
@@ -2936,7 +3014,7 @@ if __name__ == '__main__':
     print(f"✅ Web server started on port {os.environ.get('PORT', 8080)}")
 
     print("\n" + "=" * 60)
-    print("🚀 LAUNCHING TELEGRAM BOTS")
+    print("🚀 LAUNCHING TELEGRAM BOTS v3.0")
     print("=" * 60)
 
     try:
@@ -2945,7 +3023,6 @@ if __name__ == '__main__':
         print("\n\n🛑 Interrupted by user")
     except Exception as e:
         print(f"\n\n❌ FATAL ERROR: {e}")
-        logger.error(f"Fatal error: {e}", exc_info=True)
         import traceback
         traceback.print_exc()
         exit(1)
