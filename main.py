@@ -3530,7 +3530,7 @@ async def run_bots():
 
     print("✅ Tokens verified")
 
-    # ============ MAIN BOT ============
+# ============ MAIN BOT ============
     print("\n⚙️  Configuring Main Bot (Admin)...")
     main_app = Application.builder().token(MAIN_BOT_TOKEN).build()
 
@@ -3556,7 +3556,8 @@ async def run_bots():
         ],
         allow_reentry=True
     )
-        # ⚠️ CP Conversation Handler
+    
+    # ⚠️ CP Conversation Handler
     cp_conv = ConversationHandler(
         entry_points=[CommandHandler('cp', start_cp_upload)],
         states={
@@ -3577,10 +3578,12 @@ async def run_bots():
         ],
         allow_reentry=True
     )
-   main_app.add_handler(cp_conv)
-   main_app.add_handler(upload_conv)   # 👈 Yeh line add karo
+    
+    # Ye lines ab properly 4-space indented hain
+    main_app.add_handler(cp_conv)
+    main_app.add_handler(upload_conv)   # 👈 Yeh line add karo
 
-   bulk_conv = ConversationHandler(
+    bulk_conv = ConversationHandler(
         entry_points=[CommandHandler('bulk', start_bulk_upload)],
         states={
             BULK_WAIT_VIDEO: [
@@ -3596,6 +3599,7 @@ async def run_bots():
         ],
         allow_reentry=True
     )
+    
     main_app.add_handler(bulk_conv)
     main_app.add_handler(CommandHandler('start', admin_start))
     main_app.add_handler(CommandHandler('check_expiry', test_expiry_check))
