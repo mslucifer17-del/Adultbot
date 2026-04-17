@@ -1913,44 +1913,44 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text(f"❌ Upload failed: {e}")
         return CP_WAIT_VIDEO
     
-    # --- POSTER HANDLING (FIX) ---
-    raw_poster_id = None
-    if video_obj and video_obj.thumbnail:
-        raw_poster_id = video_obj.thumbnail.file_id
-    elif doc_obj and doc_obj.thumbnail:
-        raw_poster_id = doc_obj.thumbnail.file_id
+    # In get_cp_video function, replace the poster handling section with:
+# --- IMPROVED POSTER HANDLING ---
+raw_poster_id = None
+if video_obj and video_obj.thumbnail:
+    raw_poster_id = video_obj.thumbnail.file_id
+elif doc_obj and doc_obj.thumbnail:
+    raw_poster_id = doc_obj.thumbnail.file_id
 
-    valid_poster_id = None
-    if raw_poster_id:
+valid_poster_id = None
+if raw_poster_id:
+    try:
+        # Convert thumbnail to VALID photo file_id
+        temp_photo = await context.bot.send_photo(
+            chat_id=msg.chat_id,  # Use admin chat for temp conversion
+            photo=raw_poster_id,
+            caption=""
+        )
+        valid_poster_id = temp_photo.photo[-1].file_id
+        await temp_photo.delete()
+        logger.info(f"✅ CP poster converted: thumbnail → photo file_id")
+    except Exception as e:
+        logger.error(f"❌ Poster conversion failed: {e}")
+
+# Fallback: Create placeholder if conversion fails
+if not valid_poster_id:
+    placeholder = await create_placeholder_thumbnail(title)
+    if placeholder:
         try:
-            # Thumbnail ko photo ki tarah bhejkar valid photo file_id prapt karein
             temp_photo = await context.bot.send_photo(
-                chat_id=CP_CHANNEL_ID,
-                photo=raw_poster_id,
+                chat_id=msg.chat_id,
+                photo=placeholder,
                 caption=""
             )
             valid_poster_id = temp_photo.photo[-1].file_id
-            await temp_photo.delete()  # Temporary message hata dein
-            logger.info(f"✅ Converted thumbnail to valid photo for CP {title}")
+            await temp_photo.delete()
+            logger.info(f"✅ CP placeholder created")
         except Exception as e:
-            logger.error(f"❌ Failed to convert thumbnail: {e}")
-            valid_poster_id = None
-
-    # Fallback: Placeholder image agar koi poster nahi mila ya conversion fail hui
-    if not valid_poster_id:
-        try:
-            placeholder = await create_placeholder_thumbnail(title)
-            if placeholder:
-                temp_photo = await context.bot.send_photo(
-                    chat_id=CP_CHANNEL_ID,
-                    photo=placeholder,
-                    caption=""
-                )
-                valid_poster_id = temp_photo.photo[-1].file_id
-                await temp_photo.delete()
-                logger.info(f"✅ Created placeholder poster for CP {title}")
-        except Exception as e:
-            logger.error(f"❌ Placeholder creation/send failed: {e}")
+            logger.error(f"❌ Placeholder failed: {e}")
 
     await status.edit_text(
         f"✅ <b>Video Uploaded!</b>\n\n"
@@ -2864,6 +2864,10 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
 async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     chat_id = msg.chat_id
+    user = update.effective_user
+    user_name = user.first_name
+
+    logger.info(f"CP list requested by user {user.id} ({user_name})")
 
     conn = None
     cp_videos = []
@@ -2876,7 +2880,8 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cp_videos = cur.fetchall()
         cur.close()
     except Exception as e:
-        await msg.reply_text(f"❌ Error: {e}")
+        logger.error(f"CP list DB error: {e}")
+        await msg.reply_text("❌ Database error. Try again later.")
         return
     finally:
         if conn:
@@ -2884,60 +2889,95 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not cp_videos:
         await msg.reply_text("❌ <b>No videos available!</b>\n\n🔔 Check back later.", parse_mode='HTML')
+        asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
         return
 
+    # Delete start message
     asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 5))
 
-    header = await msg.reply_text("🔞 <b>EXCLUSIVE COLLECTION</b>\n\n🖼️ <i>Loading posters...</i>", parse_mode='HTML')
+    # Loading message
+    loading_msg = await msg.reply_text("🔞 <b>EXCLUSIVE COLLECTION</b>\n\n🖼️ <i>Converting posters...</i>", parse_mode='HTML')
 
-    # 先尝试转换所有 poster_file_id 为有效的 photo file_id
-    valid_posters = []
+    # 🔥 STEP 1: Convert ALL thumbnails to valid photo file_ids FIRST
+    valid_media = []
+    conversion_success = 0
+    
     for cp_id, title, poster_id, price in cp_videos:
-        valid_id = poster_id
-        if poster_id:
-            try:
-                # 尝试发送为照片并立即删除，以获取真正的 photo file_id
-                temp = await context.bot.send_photo(chat_id=chat_id, photo=poster_id)
-                valid_id = temp.photo[-1].file_id
-                await temp.delete()
-            except Exception:
-                valid_id = None  # 彻底无效
-        valid_posters.append((cp_id, title, valid_id, price))
-
-    # 构建媒体组（只使用有效的 photo id）
-    media_group = []
-    for cp_id, title, poster_id, price in valid_posters:
         if not poster_id:
+            logger.warning(f"CP {cp_id}: No poster, skipping")
             continue
-        caption = f"🎬 <b>{html_escape(title[:60])}</b>\n💰 Price: <b>₹{price}</b>\n🆔 Video ID: <code>{cp_id}</code>"
-        media_group.append(InputMediaPhoto(media=poster_id, caption=caption, parse_mode='HTML'))
-
-    album_success = False
-    if media_group:
+            
+        valid_photo_id = None
+        
         try:
-            for i in range(0, len(media_group), 10):
-                await context.bot.send_media_group(chat_id=chat_id, media=media_group[i:i+10])
-                await asyncio.sleep(1)
-            album_success = True
+            # Convert thumbnail → valid photo file_id
+            temp_msg = await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=poster_id,
+                caption=""
+            )
+            valid_photo_id = temp_msg.photo[-1].file_id  # ✅ This is VALID photo file_id
+            await temp_msg.delete()  # Clean up temp message
+            conversion_success += 1
+            logger.info(f"✅ CP {cp_id}: Thumbnail converted to photo")
         except Exception as e:
-            logger.warning(f"Album send failed: {e}, falling back to individual send")
+            logger.error(f"❌ CP {cp_id} conversion failed: {e}")
+            continue
+        
+        # Build caption for media group
+        caption = (
+            f"🎬 <b>{html_escape(title[:55])}</b>\n"
+            f"💰 Price: <b>₹{price}</b>\n"
+            f"🆔 ID: <code>{cp_id}</code>"
+        )
+        
+        valid_media.append(
+            InputMediaPhoto(
+                media=valid_photo_id,  # ✅ Now using VALID photo file_id
+                caption=caption,
+                parse_mode='HTML'
+            )
+        )
+    
+    await loading_msg.delete()
 
-    if not album_success:
-        await header.edit_text("🔞 <b>EXCLUSIVE COLLECTION</b>\n\n🖼️ <i>Showing posters one by one...</i>", parse_mode='HTML')
-        for cp_id, title, poster_id, price in valid_posters:
-            caption = f"🎬 <b>{html_escape(title[:60])}</b>\n💰 Price: <b>₹{price}</b>\n🆔 Video ID: <code>{cp_id}</code>"
-            if poster_id:
-                try:
-                    await context.bot.send_photo(chat_id=chat_id, photo=poster_id, caption=caption, parse_mode='HTML')
-                except Exception:
-                    await context.bot.send_message(chat_id=chat_id, text=caption, parse_mode='HTML')
-            else:
-                await context.bot.send_message(chat_id=chat_id, text=caption, parse_mode='HTML')
-            await asyncio.sleep(0.5)
+    if not valid_media:
+        await msg.reply_text(
+            "❌ <b>No valid posters available!</b>\n\n"
+            "Admin ko batao posters missing hain.",
+            parse_mode='HTML'
+        )
+        return
 
-    instruction = await msg.reply_text(
-        "👉 <b>How to Buy:</b>\n\n1️⃣ Find the Video ID in the caption.\n2️⃣ Send that ID to me.\n3️⃣ Get payment QR.\n\n📌 Example: <code>123</code>",
-        parse_mode='HTML'
+    logger.info(f"✅ {conversion_success}/{len(cp_videos)} posters converted successfully")
+
+    # 🔥 STEP 2: Send media groups (max 10 per group)
+    try:
+        chunk_size = 10
+        for i in range(0, len(valid_media), chunk_size):
+            chunk = valid_media[i:i+chunk_size]
+            await context.bot.send_media_group(chat_id=chat_id, media=chunk)
+            logger.info(f"✅ Sent media group {i//chunk_size + 1} ({len(chunk)} items)")
+            await asyncio.sleep(1)  # Rate limit protection
+        
+    except Exception as e:
+        logger.error(f"❌ Media group send failed: {e}")
+        await msg.reply_text("❌ Failed to send posters. Try /start cp_list again.")
+        return
+
+    # 🔥 STEP 3: Instructions
+    instruction = await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "👉 <b>How to Buy:</b>\n\n"
+            "1️⃣ Copy Video ID from poster caption\n"
+            "2️⃣ Send that ID here\n"
+            "3️⃣ Get payment QR\n\n"
+            f"📌 <b>Example:</b> <code>123</code>\n\n"
+            f"🔞 Total: {len(valid_media)} videos"
+        ),
+        parse_mode='HTML',
+        disable_web_page_preview=True
     )
     asyncio.create_task(schedule_delete(context, chat_id, instruction.message_id, TEXT_DELETE_TIME * 2))
     
