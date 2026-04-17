@@ -6,6 +6,7 @@ import logging
 import aiohttp
 import psycopg2
 from urllib.parse import quote
+from telegram import InputMediaPhoto
 from html import escape as html_escape
 from psycopg2 import pool
 from flask import Flask, redirect
@@ -61,7 +62,7 @@ if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     logger.info("✅ Fixed DATABASE_URL format for psycopg2")
 
 WEB_DOMAIN = os.environ.get("WEB_DOMAIN", "https://my-bot.onrender.com").strip()
-ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID", "0"))
+ADMIN_USER_IDS = [int(uid.strip()) for uid in os.environ.get("ADMIN_USER_IDS", "").split(",") if uid.strip()]
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "ownermahi")
 
 FREE_CH = int(os.environ.get("FREE_CHANNEL_ID", "0"))
@@ -1012,7 +1013,7 @@ async def send_trim_preview(context, chat_id, trim_type, trim_file_id, trim_chat
 
 async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         await update.message.reply_text(
             "❌ <b>Access Denied!</b>\n\n"
             "Yeh Admin Bot hai. Sirf admin use kar sakta hai.\n\n"
@@ -1046,7 +1047,7 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         await update.message.reply_text("❌ Access Denied!")
         return ConversationHandler.END
 
@@ -1511,7 +1512,7 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
 # ================================================================
 
 async def start_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         await update.message.reply_text("❌ Access Denied!")
         return ConversationHandler.END
 
@@ -1842,7 +1843,7 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def start_cp_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin-only CP batch upload start"""
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         await update.message.reply_text("❌ Access Denied!")
         return ConversationHandler.END
     
@@ -2026,7 +2027,7 @@ async def cancel_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin ke liye bot statistics dikhao"""
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         await update.message.reply_text("❌ Access Denied!")
         return
 
@@ -2820,7 +2821,7 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
 # ================================================================
 
 async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """CP videos list with posters"""
+    """CP videos list with posters as a media album"""
     msg = update.message
     chat_id = msg.chat_id
     user = update.effective_user
@@ -2857,51 +2858,58 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Header
     header = await msg.reply_text(
         f"🔞 <b>EXCLUSIVE COLLECTION</b>\n\n"
-        f"👇 Click price to buy:",
+        f"🖼️ <i>Swipe to see all posters. To buy, send the Video ID shown in the caption.</i>",
         parse_mode='HTML'
     )
     asyncio.create_task(schedule_delete(context, chat_id, header.message_id, TEXT_DELETE_TIME))
     
-    # Send each video poster
+    # Prepare media group
+    media_group = []
     for (cp_id, title, poster_id, price) in cp_videos:
-        bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
-        payment_link = f"https://t.me/{bot_username}?start=cp_{cp_id}"
-        
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"💰 ₹{price} - Buy Now", url=payment_link)]
-        ])
-        
+        if not poster_id:
+            logger.warning(f"CP video {cp_id} has no poster, skipping from album")
+            continue
+            
         caption = (
-            f"🎬 <b>{html_escape(title[:60])}</b>\n\n"
-            f"💰 Price: <b>₹{price}</b>"
+            f"🎬 <b>{html_escape(title[:60])}</b>\n"
+            f"💰 Price: <b>₹{price}</b>\n"
+            f"🆔 Video ID: <code>{cp_id}</code>"
         )
         
-        if poster_id:
-            try:
-                sent = await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=poster_id,
-                    caption=caption,
-                    parse_mode='HTML',
-                    reply_markup=keyboard,
-                    has_spoiler=True
-                )
-                asyncio.create_task(schedule_delete(context, chat_id, sent.message_id, TEXT_DELETE_TIME))
-            except Exception as e:
-                logger.error(f"CP poster send error {cp_id}: {e}")
-        else:
-            try:
-                sent = await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=caption,
-                    parse_mode='HTML',
-                    reply_markup=keyboard
-                )
-                asyncio.create_task(schedule_delete(context, chat_id, sent.message_id, TEXT_DELETE_TIME))
-            except Exception as e:
-                logger.error(f"CP text send error {cp_id}: {e}")  # 👈 Already hai, check logs
+        media_group.append(
+            InputMediaPhoto(
+                media=poster_id,
+                caption=caption,
+                parse_mode='HTML'
+            )
+        )
+    
+    if not media_group:
+        await msg.reply_text("❌ No posters available to display.")
+        return
         
-        await asyncio.sleep(0.5)
+    try:
+        # Send album (max 10 media per group, Telegram limit)
+        chunk_size = 10
+        for i in range(0, len(media_group), chunk_size):
+            chunk = media_group[i:i+chunk_size]
+            await context.bot.send_media_group(chat_id=chat_id, media=chunk)
+            await asyncio.sleep(1)  # Rate limit से बचने के लिए
+        
+        # Instruction message
+        instruction = await msg.reply_text(
+            f"👉 <b>How to Buy:</b>\n\n"
+            f"1️⃣ Find the Video ID in the caption of the poster you like.\n"
+            f"2️⃣ Send that Video ID to me here.\n"
+            f"3️⃣ I will give you the payment QR.\n\n"
+            f"📌 <i>Example: just type</i> <code>123</code>",
+            parse_mode='HTML'
+        )
+        asyncio.create_task(schedule_delete(context, chat_id, instruction.message_id, TEXT_DELETE_TIME * 2))
+        
+    except Exception as e:
+        logger.error(f"Failed to send CP media group: {e}")
+        await msg.reply_text("❌ Failed to send posters. Please try again later.")
 
 
 async def show_cp_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cp_id: int):
@@ -3462,7 +3470,7 @@ async def check_expired_subscriptions(provider_app_instance: Application):
 # ============ TESTING COMMAND (ADMIN ONLY) ============
 async def test_expiry_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manual trigger for testing expiry notifications"""
-    if update.effective_user.id != ADMIN_USER_ID:
+    if update.effective_user.id not in ADMIN_USER_IDS:
         await update.message.reply_text("❌ Admin only!")
         return
 
