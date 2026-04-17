@@ -1866,7 +1866,7 @@ async def start_cp_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """CP video receive aur backup mein upload"""
+    """CP video receive aur backup mein upload with valid poster conversion"""
     msg = update.message
     
     if msg.text and msg.text.strip().lower() == '/cancel':
@@ -1898,8 +1898,8 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             title = f"CP Video #{int(datetime.now().timestamp())}"
     
-    # Backup channel mein upload
-    status = await msg.reply_text("⏳ Uploading to backup...")
+    # Backup channel mein video upload
+    status = await msg.reply_text("⏳ Uploading video to CP channel...")
     try:
         copied = await context.bot.copy_message(
             chat_id=CP_CHANNEL_ID,
@@ -1908,48 +1908,67 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption=""
         )
         video_file_url = construct_file_url(CP_CHANNEL_ID, copied.message_id)
+        logger.info(f"✅ CP Video copied to {CP_CHANNEL_ID}, message_id: {copied.message_id}")
     except Exception as e:
         await status.edit_text(f"❌ Upload failed: {e}")
         return CP_WAIT_VIDEO
     
-    # Poster extract (thumbnail)
-    poster_file_id = None
+    # --- POSTER HANDLING (FIX) ---
+    raw_poster_id = None
     if video_obj and video_obj.thumbnail:
-        poster_file_id = video_obj.thumbnail.file_id
+        raw_poster_id = video_obj.thumbnail.file_id
     elif doc_obj and doc_obj.thumbnail:
-        poster_file_id = doc_obj.thumbnail.file_id
-    
-    # Fallback: placeholder thumbnail
-        # Fallback: placeholder thumbnail
-    if not poster_file_id:
+        raw_poster_id = doc_obj.thumbnail.file_id
+
+    valid_poster_id = None
+    if raw_poster_id:
+        try:
+            # Thumbnail ko photo ki tarah bhejkar valid photo file_id prapt karein
+            temp_photo = await context.bot.send_photo(
+                chat_id=CP_CHANNEL_ID,
+                photo=raw_poster_id,
+                caption=""
+            )
+            valid_poster_id = temp_photo.photo[-1].file_id
+            await temp_photo.delete()  # Temporary message hata dein
+            logger.info(f"✅ Converted thumbnail to valid photo for CP {title}")
+        except Exception as e:
+            logger.error(f"❌ Failed to convert thumbnail: {e}")
+            valid_poster_id = None
+
+    # Fallback: Placeholder image agar koi poster nahi mila ya conversion fail hui
+    if not valid_poster_id:
         try:
             placeholder = await create_placeholder_thumbnail(title)
             if placeholder:
-                placeholder_msg = await context.bot.send_photo(
-                    chat_id=CP_CHANNEL_ID,   # 👈 BACKUP_1 ki jagah CP_CHANNEL_ID
+                temp_photo = await context.bot.send_photo(
+                    chat_id=CP_CHANNEL_ID,
                     photo=placeholder,
                     caption=""
                 )
-                poster_file_id = placeholder_msg.photo[-1].file_id
+                valid_poster_id = temp_photo.photo[-1].file_id
+                await temp_photo.delete()
+                logger.info(f"✅ Created placeholder poster for CP {title}")
         except Exception as e:
-            logger.error(f"Placeholder creation/send failed: {e}")
-    
-    # Temporary save
-    context.user_data['cp_title'] = title
-    context.user_data['cp_video_url'] = video_file_url
-    context.user_data['cp_poster_id'] = poster_file_id
-    
+            logger.error(f"❌ Placeholder creation/send failed: {e}")
+
     await status.edit_text(
         f"✅ <b>Video Uploaded!</b>\n\n"
         f"📝 Title: {html_escape(title)}\n"
-        f"📹 Video: Backup mein saved\n"
-        f"🖼️ Poster: {'✅ Extracted' if poster_file_id else '❌ Missing'}\n\n"
+        f"📹 Video: CP Channel mein saved\n"
+        f"🖼️ Poster: {'✅ Ready' if valid_poster_id else '❌ Missing'}\n\n"
         f"💰 <b>Step 2:</b> Price enter karo (₹)\n\n"
         f"Example: <code>50</code>\n"
         f"Leave blank for default (50)\n\n"
         f"❌ Cancel: /cancel",
         parse_mode='HTML'
     )
+    
+    # Temporary save in user_data for next step
+    context.user_data['cp_title'] = title
+    context.user_data['cp_video_url'] = video_file_url
+    context.user_data['cp_poster_id'] = valid_poster_id
+    
     return CP_WAIT_AMOUNT
 
 
@@ -2730,6 +2749,28 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
         return
 
+        # ---------- CP Video ID handling ----------
+    if text.isdigit():
+        cp_id = int(text)
+        # Check if it's a valid CP video
+        conn = None
+        exists = False
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT cp_id FROM cp_videos WHERE cp_id = %s", (cp_id,))
+            if cur.fetchone():
+                exists = True
+            cur.close()
+        except:
+            pass
+        finally:
+            if conn:
+                db_pool.putconn(conn)
+                
+        if exists:
+            await show_cp_payment(update, context, cp_id)
+            return
     # ---------- Payment Flow: UTR Step (Auto-Verification) ----------
     if payment_step == 'utr':
         utr_number = msg.text.strip()
