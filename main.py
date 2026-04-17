@@ -3643,7 +3643,7 @@ async def run_bots():
         print("\n" + "=" * 60)
         print("🎉 BOTH BOTS RUNNING SUCCESSFULLY! v3.0 Enhanced")
         print("=" * 60)
-        print(f"👤 Admin User ID: {ADMIN_USER_ID}")
+        print(f"👤 Admin User IDs: {ADMIN_USER_IDS}")
         print(f"🤖 Provider Bot: @{PROVIDER_BOT_USERNAME}")
         print(f"📦 Backup Channel: {BACKUP_1}")
         print(f"🆓 Free Channel: {FREE_CH}")
