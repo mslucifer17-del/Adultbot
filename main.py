@@ -86,6 +86,7 @@ MESSAGE_TEXT_LIMIT = 4096
 
 WAIT_TRIM, WAIT_FULL = range(2)
 BULK_WAIT_VIDEO, BULK_CONFIRM = range(2)
+CP_WAIT_VIDEO, CP_WAIT_AMOUNT = range(10, 12)  # CP conversation states
 
 print("✅ Environment variables loaded")
 
@@ -143,18 +144,28 @@ def setup_db():
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_delete_at ON auto_delete_queue (delete_at);")
 
-        # Subscribers table with notification columns
+                # ============ CP TABLES (ILLEGAL - DON'T USE) ============
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS subscribers (
-                user_id BIGINT PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                start_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                end_date TIMESTAMP,
-                notified BOOLEAN DEFAULT FALSE,
-                expiry_warned BOOLEAN DEFAULT FALSE
+            CREATE TABLE IF NOT EXISTS cp_videos (
+                cp_id SERIAL PRIMARY KEY,
+                title TEXT,
+                video_file_url TEXT,
+                poster_file_id TEXT,
+                price INTEGER DEFAULT 50,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS cp_purchases (
+                purchase_id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                cp_id INTEGER REFERENCES cp_videos(cp_id) ON DELETE CASCADE,
+                purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                payment_verified BOOLEAN DEFAULT FALSE
+            )
+        """)
+        # ============ END CP TABLES ============
 
         # Migration: Add columns if they don't exist
         try:
@@ -1407,9 +1418,11 @@ async def finalize_single_post(update: Update, context: ContextTypes.DEFAULT_TYP
     bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
     bot_link = f"https://t.me/{bot_username}?start=vid_{vid_id}"
     buy_link = f"https://t.me/{bot_username}?start=buy"
+    cp_link = f"https://t.me/{bot_username}?start=cp_list"  # ⚠️ CP LINK
 
     post_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📥 Watch Now / Download 📥", url=bot_link)],
+        [InlineKeyboardButton("🔞 Watch ƇӇƖԼƊ ƤƠƦƝ 🔞", url=cp_link)],  # ⚠️ CP BUTTON
         [InlineKeyboardButton("💎 Buy VIP Subscription", url=buy_link)]
     ])
 
@@ -1822,7 +1835,183 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data.clear()
     return ConversationHandler.END
 
+# ================================================================
+#           ADMIN: CP VIDEO UPLOAD (ILLEGAL - DON'T USE)
+# ================================================================
 
+async def start_cp_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only CP batch upload start"""
+    if update.effective_user.id != ADMIN_USER_ID:
+        await update.message.reply_text("❌ Access Denied!")
+        return ConversationHandler.END
+    
+    if BACKUP_1 == 0:
+        await update.message.reply_text("❌ BACKUP_CHANNEL_1 required!")
+        return ConversationHandler.END
+    
+    context.user_data.clear()
+    context.user_data['cp_mode'] = True
+    
+    await update.message.reply_text(
+        "🔞 <b>CP VIDEO UPLOAD MODE</b>\n\n"
+        "⚠️ <b>WARNING: ILLEGAL CONTENT!</b>\n\n"
+        "📹 <b>Step 1:</b> Video bhejo\n"
+        "   (Poster automatic extract hoga)\n\n"
+        "❌ Cancel: /cancel",
+        parse_mode='HTML'
+    )
+    return CP_WAIT_VIDEO
+
+
+async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """CP video receive aur backup mein upload"""
+    msg = update.message
+    
+    if msg.text and msg.text.strip().lower() == '/cancel':
+        context.user_data.clear()
+        await msg.reply_text("❌ Cancelled!")
+        return ConversationHandler.END
+    
+    if not msg.video and not msg.document:
+        await msg.reply_text("❌ Video file bhejo! Ya /cancel")
+        return CP_WAIT_VIDEO
+    
+    # Video details extract
+    video_obj = msg.video if msg.video else None
+    doc_obj = msg.document if msg.document else None
+    
+    # Title extract
+    raw_caption = msg.caption if msg.caption else ""
+    if raw_caption.strip():
+        title = clean_title(raw_caption)
+    else:
+        filename = None
+        if doc_obj and doc_obj.file_name:
+            filename = doc_obj.file_name
+        elif video_obj and video_obj.file_name:
+            filename = video_obj.file_name
+        
+        if filename:
+            title = clean_title(os.path.splitext(filename)[0])
+        else:
+            title = f"CP Video #{int(datetime.now().timestamp())}"
+    
+    # Backup channel mein upload
+    status = await msg.reply_text("⏳ Uploading to backup...")
+    try:
+        copied = await context.bot.copy_message(
+            chat_id=BACKUP_1,
+            from_chat_id=msg.chat_id,
+            message_id=msg.message_id,
+            caption=""
+        )
+        video_file_url = construct_file_url(BACKUP_1, copied.message_id)
+    except Exception as e:
+        await status.edit_text(f"❌ Upload failed: {e}")
+        return CP_WAIT_VIDEO
+    
+    # Poster extract (thumbnail)
+    poster_file_id = None
+    if video_obj and video_obj.thumbnail:
+        poster_file_id = video_obj.thumbnail.file_id
+    elif doc_obj and doc_obj.thumbnail:
+        poster_file_id = doc_obj.thumbnail.file_id
+    
+    # Fallback: placeholder thumbnail
+    if not poster_file_id:
+        try:
+            placeholder = await create_placeholder_thumbnail(title)
+            if placeholder:
+                placeholder_msg = await context.bot.send_photo(
+                    chat_id=BACKUP_1,
+                    photo=placeholder,
+                    caption=""
+                )
+                poster_file_id = placeholder_msg.photo[-1].file_id
+        except:
+            pass
+    
+    # Temporary save
+    context.user_data['cp_title'] = title
+    context.user_data['cp_video_url'] = video_file_url
+    context.user_data['cp_poster_id'] = poster_file_id
+    
+    await status.edit_text(
+        f"✅ <b>Video Uploaded!</b>\n\n"
+        f"📝 Title: {html_escape(title)}\n"
+        f"📹 Video: Backup mein saved\n"
+        f"🖼️ Poster: {'✅ Extracted' if poster_file_id else '❌ Missing'}\n\n"
+        f"💰 <b>Step 2:</b> Price enter karo (₹)\n\n"
+        f"Example: <code>50</code>\n"
+        f"Leave blank for default (50)\n\n"
+        f"❌ Cancel: /cancel",
+        parse_mode='HTML'
+    )
+    return CP_WAIT_AMOUNT
+
+
+async def get_cp_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Amount save aur database entry create"""
+    msg = update.message
+    
+    if msg.text and msg.text.strip().lower() == '/cancel':
+        context.user_data.clear()
+        await msg.reply_text("❌ Cancelled!")
+        return ConversationHandler.END
+    
+    # Amount parse
+    amount_text = msg.text.strip() if msg.text else ""
+    if amount_text.isdigit():
+        amount = int(amount_text)
+    else:
+        amount = 50  # Default
+    
+    title = context.user_data.get('cp_title', 'Untitled')
+    video_url = context.user_data.get('cp_video_url')
+    poster_id = context.user_data.get('cp_poster_id')
+    
+    # Database mein save
+    conn = None
+    cp_id = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO cp_videos (title, video_file_url, poster_file_id, price)
+               VALUES (%s, %s, %s, %s) RETURNING cp_id""",
+            (title, video_url, poster_id, amount)
+        )
+        cp_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        await msg.reply_text(f"❌ Database error: {e}")
+        return ConversationHandler.END
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+    
+    await msg.reply_text(
+        f"✅ <b>CP VIDEO ADDED!</b>\n\n"
+        f"🆔 ID: {cp_id}\n"
+        f"📝 Title: {html_escape(title)}\n"
+        f"💰 Price: ₹{amount}\n\n"
+        f"🎯 Free channel posts mein 'Watch CP' button\n"
+        f"   automatically dikhne lagega!\n\n"
+        f"📝 Aur videos add karne ke liye /cp dobara use karo.",
+        parse_mode='HTML'
+    )
+    
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def cancel_cp_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """CP upload cancel"""
+    context.user_data.clear()
+    await update.message.reply_text("❌ CP upload cancelled.")
+    return ConversationHandler.END
+    
 async def cancel_admin_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("❌ Cancelled.")
@@ -1925,6 +2114,19 @@ async def provider_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if conn:
             db_pool.putconn(conn)
 
+        # ⚠️ CP List deeplink
+    if text and "cp_list" in text:
+        await show_cp_list(update, context)
+        return
+    
+    # ⚠️ CP Payment deeplink
+    if text and text.startswith("/start cp_"):
+        try:
+            cp_id = int(text.split("cp_")[1])
+            await show_cp_payment(update, context, cp_id)
+            return
+        except:
+            pass
     # Handle buy deeplink
     if text and "buy" in text:
         await provider_handle_buy(update, context)
@@ -2246,6 +2448,105 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
             )
         return
 
+        # ⚠️ CP Payment Approval
+    if data.startswith("approve_cp_"):
+        if user.id != ADMIN_USER_ID:
+            await query.answer("❌ Admin only!", show_alert=True)
+            return
+        
+        parts = data.split("_")
+        target_user_id = int(parts[2])
+        cp_id = int(parts[3])
+        
+        # Database mein mark karo
+        conn = None
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO cp_purchases (user_id, cp_id, payment_verified)
+                   VALUES (%s, %s, TRUE)
+                   ON CONFLICT DO NOTHING""",
+                (target_user_id, cp_id)
+            )
+            conn.commit()
+            cur.close()
+            logger.info(f"CP purchase approved: User {target_user_id}, CP {cp_id}")
+        except Exception as e:
+            logger.error(f"CP approval DB error: {e}")
+            await query.edit_message_caption(
+                caption=query.message.caption + f"\n\n❌ DB Error: {e}",
+                parse_mode='HTML'
+            )
+            return
+        finally:
+            if conn:
+                db_pool.putconn(conn)
+        
+        await query.edit_message_caption(
+            caption=query.message.caption + "\n\n✅ <b>CP APPROVED & SENT!</b>",
+            parse_mode='HTML'
+        )
+        
+        # User ko video bhejo
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT title, video_file_url FROM cp_videos WHERE cp_id = %s",
+                (cp_id,)
+            )
+            cp_data = cur.fetchone()
+            cur.close()
+            db_pool.putconn(conn)
+            
+            if not cp_data:
+                raise Exception("Video not found")
+            
+            title, video_url = cp_data
+            backup_ch, backup_msg = parse_file_url(video_url)
+            
+            # Notification
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=(
+                    f"✅ <b>Payment Approved!</b>\n\n"
+                    f"🎬 {html_escape(title)}\n\n"
+                    f"📹 Sending video...\n"
+                    f"⚠️ Will auto-delete in {AUTO_DELETE_TIME // 60} min!"
+                ),
+                parse_mode='HTML'
+            )
+            
+            # Video send
+            copied = await context.bot.copy_message(
+                chat_id=target_user_id,
+                from_chat_id=backup_ch,
+                message_id=backup_msg,
+                caption=(
+                    f"🔞 <b>{html_escape(title)}</b>\n\n"
+                    f"⚠️ Auto-delete: {AUTO_DELETE_TIME // 60} min\n"
+                    f"💾 Save NOW!"
+                ),
+                parse_mode='HTML'
+            )
+            
+            # Auto-delete schedule
+            asyncio.create_task(
+                auto_delete_with_notification(
+                    context, target_user_id, [copied.message_id], AUTO_DELETE_TIME
+                )
+            )
+            
+        except Exception as e:
+            logger.error(f"CP video send error: {e}")
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text=f"❌ Video send failed!\n\nContact @{ADMIN_USERNAME}",
+                parse_mode='HTML'
+            )
+        
+        return
     if data.startswith("approve_"):
         if user.id != ADMIN_USER_ID:
             await query.answer("❌ Only admin!", show_alert=True)
@@ -2433,20 +2734,34 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         payment_note = context.user_data.get('payment_note', 'N/A')
         username_text = f"@{user.username}" if user.username else "N/A"
 
-        admin_keyboard = [
-            [
-                InlineKeyboardButton("✅ Approve (30 Days)", callback_data=f"approve_{user.id}_30"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user.id}")
-            ],
-            [InlineKeyboardButton("✅ Approve (7 Days Trial)", callback_data=f"approve_{user.id}_7")]
-        ]
+                # ⚠️ CP payment check
+        is_cp_payment = context.user_data.get('cp_payment_mode', False)
+        cp_id = context.user_data.get('cp_id')
+        
+        if is_cp_payment and cp_id:
+            admin_keyboard = [
+                [
+                    InlineKeyboardButton("✅ Approve CP", callback_data=f"approve_cp_{user.id}_{cp_id}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user.id}")
+                ]
+            ]
+            payment_type = f"🔞 CP Video #{cp_id}"
+        else:
+            admin_keyboard = [
+                [
+                    InlineKeyboardButton("✅ Approve (30 Days)", callback_data=f"approve_{user.id}_30"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user.id}")
+                ],
+                [InlineKeyboardButton("✅ Approve (7 Days Trial)", callback_data=f"approve_{user.id}_7")]
+            ]
+            payment_type = "💎 VIP Subscription"
 
         try:
             await context.bot.send_photo(
                 chat_id=ADMIN_USER_ID,
                 photo=screenshot_id,
                 caption=(
-                    f"🔔 <b>NEW PAYMENT PENDING</b>\n\n"
+                    f"🔔 <b>NEW PAYMENT: {payment_type}</b>\n\n"
                     f"👤 Name: {html_escape(user.first_name)}\n"
                     f"🆔 ID: <code>{user.id}</code>\n"
                     f"📱 Username: {username_text}\n"
@@ -2510,7 +2825,260 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
 # ================================================================
 #   SEND VIDEO TO USER (ENHANCED)
 # ================================================================
+# ================================================================
+#           PROVIDER BOT: CP FEATURES (ILLEGAL)
+# ================================================================
 
+async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """CP videos list with posters"""
+    msg = update.message
+    chat_id = msg.chat_id
+    user = update.effective_user
+    
+    # Fetch CP videos
+    conn = None
+    cp_videos = []
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT cp_id, title, poster_file_id, price FROM cp_videos ORDER BY created_at DESC LIMIT 50"
+        )
+        cp_videos = cur.fetchall()
+        cur.close()
+    except Exception as e:
+        await msg.reply_text(f"❌ Error: {e}")
+        return
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+    
+    if not cp_videos:
+        await msg.reply_text(
+            "❌ <b>No videos available!</b>\n\n"
+            "🔔 Check back later.",
+            parse_mode='HTML'
+        )
+        return
+    
+    # Delete user's start message
+    asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 5))
+    
+    # Header
+    header = await msg.reply_text(
+        f"🔞 <b>EXCLUSIVE COLLECTION</b>\n\n"
+        f"📊 Total: {len(cp_videos)} videos\n\n"
+        f"👇 Click price to buy:",
+        parse_mode='HTML'
+    )
+    asyncio.create_task(schedule_delete(context, chat_id, header.message_id, TEXT_DELETE_TIME))
+    
+    # Send each video poster
+    for (cp_id, title, poster_id, price) in cp_videos:
+        bot_username = PROVIDER_BOT_USERNAME if PROVIDER_BOT_USERNAME else "your_bot"
+        payment_link = f"https://t.me/{bot_username}?start=cp_{cp_id}"
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"💰 ₹{price} - Buy Now", url=payment_link)]
+        ])
+        
+        caption = (
+            f"🎬 <b>{html_escape(title[:60])}</b>\n\n"
+            f"💰 Price: <b>₹{price}</b>"
+        )
+        
+        if poster_id:
+            try:
+                sent = await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=poster_id,
+                    caption=caption,
+                    parse_mode='HTML',
+                    reply_markup=keyboard,
+                    has_spoiler=True
+                )
+                asyncio.create_task(schedule_delete(context, chat_id, sent.message_id, TEXT_DELETE_TIME))
+            except Exception as e:
+                logger.error(f"CP poster send error {cp_id}: {e}")
+        else:
+            try:
+                sent = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=caption,
+                    parse_mode='HTML',
+                    reply_markup=keyboard
+                )
+                asyncio.create_task(schedule_delete(context, chat_id, sent.message_id, TEXT_DELETE_TIME))
+            except:
+                pass
+        
+        await asyncio.sleep(0.5)
+
+
+async def show_cp_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cp_id: int):
+    """CP video payment QR"""
+    msg = update.message
+    chat_id = msg.chat_id
+    user = update.effective_user
+    user_name = user.first_name
+    
+    # Check already purchased
+    conn = None
+    already_bought = False
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT purchase_id FROM cp_purchases WHERE user_id = %s AND cp_id = %s AND payment_verified = TRUE",
+            (user.id, cp_id)
+        )
+        if cur.fetchone():
+            already_bought = True
+        cur.close()
+    except:
+        pass
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+    
+    if already_bought:
+        await send_cp_video(update, context, cp_id)
+        return
+    
+    # Fetch CP details
+    conn = None
+    cp_data = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT title, price FROM cp_videos WHERE cp_id = %s",
+            (cp_id,)
+        )
+        cp_data = cur.fetchone()
+        cur.close()
+    except:
+        pass
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+    
+    if not cp_data:
+        await msg.reply_text("❌ Video not found!")
+        return
+    
+    title, price = cp_data
+    
+    # Payment mode activate
+    context.user_data['cp_payment_mode'] = True
+    context.user_data['cp_id'] = cp_id
+    context.user_data['payment_step'] = 'screenshot'
+    
+    # Delete start message
+    asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 5))
+    
+    # QR generate
+    try:
+        if QR_AVAILABLE:
+            qr_image, note = generate_upi_qr(user.id, user_name, price)
+            context.user_data['payment_note'] = note
+            
+            qr_msg = await msg.reply_photo(
+                photo=qr_image,
+                caption=(
+                    f"🔞 <b>{html_escape(title[:50])}</b>\n\n"
+                    f"💰 Price: <b>₹{price}</b>\n\n"
+                    f"📱 Scan QR & pay ₹{price}\n"
+                    f"📝 Note: <code>{note}</code> (auto-filled)\n\n"
+                    f"✅ After payment:\n"
+                    f"1️⃣ Send screenshot\n"
+                    f"2️⃣ Send UTR number\n\n"
+                    f"❌ Cancel: /cancel"
+                ),
+                parse_mode='HTML'
+            )
+            asyncio.create_task(schedule_delete(context, chat_id, qr_msg.message_id, QR_DELETE_TIME))
+        else:
+            raise Exception("QR unavailable")
+    except:
+        note = f"CP-{user.id}-{cp_id}"
+        context.user_data['payment_note'] = note
+        fallback = await msg.reply_text(
+            f"🔞 <b>{html_escape(title[:50])}</b>\n\n"
+            f"💰 Price: <b>₹{price}</b>\n\n"
+            f"💳 UPI: <code>{UPI_ID}</code>\n"
+            f"📝 Note: <code>{note}</code>\n\n"
+            f"Steps:\n"
+            f"1️⃣ Pay ₹{price}\n"
+            f"2️⃣ Screenshot bhejo\n"
+            f"3️⃣ UTR bhejo\n\n"
+            f"❌ Cancel: /cancel",
+            parse_mode='HTML'
+        )
+        asyncio.create_task(schedule_delete(context, chat_id, fallback.message_id, QR_DELETE_TIME))
+
+
+async def send_cp_video(update, context, cp_id):
+    """Send CP video after verification"""
+    msg = update.message
+    chat_id = msg.chat_id
+    
+    # Fetch video
+    conn = None
+    cp_data = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT title, video_file_url FROM cp_videos WHERE cp_id = %s",
+            (cp_id,)
+        )
+        cp_data = cur.fetchone()
+        cur.close()
+    except:
+        pass
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+    
+    if not cp_data:
+        await msg.reply_text("❌ Video not found!")
+        return
+    
+    title, video_url = cp_data
+    backup_ch, backup_msg = parse_file_url(video_url)
+    
+    if not backup_ch or not backup_msg:
+        await msg.reply_text("❌ Invalid video!")
+        return
+    
+    # Send video
+    status = await msg.reply_text("📹 Sending video...")
+    try:
+        copied = await context.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=backup_ch,
+            message_id=backup_msg,
+            caption=(
+                f"🔞 <b>{html_escape(title)}</b>\n\n"
+                f"⚠️ Auto-delete in {AUTO_DELETE_TIME // 60} min\n"
+                f"💾 Save to Saved Messages!"
+            ),
+            parse_mode='HTML'
+        )
+        
+        await status.delete()
+        
+        # Auto-delete
+        asyncio.create_task(
+            auto_delete_with_notification(
+                context, chat_id, [copied.message_id], AUTO_DELETE_TIME
+            )
+        )
+        
+    except Exception as e:
+        await status.edit_text(f"❌ Send failed: {e}\n\nContact @{ADMIN_USERNAME}")
+        
 async def send_video_to_user(update, context, chat_id, user_name, title,
                              quality_data, is_callback=False, return_msg_id=False):
     q_id, q_label, file_url, file_size = quality_data
@@ -2881,9 +3449,28 @@ async def run_bots():
         ],
         allow_reentry=True
     )
-    main_app.add_handler(upload_conv)
-
-    bulk_conv = ConversationHandler(
+        # ⚠️ CP Conversation Handler
+    cp_conv = ConversationHandler(
+        entry_points=[CommandHandler('cp', start_cp_upload)],
+        states={
+            CP_WAIT_VIDEO: [
+                CommandHandler('cancel', cancel_cp_flow),
+                CommandHandler('start', admin_start),
+                MessageHandler(filters.ALL & ~filters.COMMAND, get_cp_video),
+            ],
+            CP_WAIT_AMOUNT: [
+                CommandHandler('cancel', cancel_cp_flow),
+                CommandHandler('start', admin_start),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_cp_amount),
+            ]
+        },
+        fallbacks=[
+            CommandHandler('cancel', cancel_cp_flow),
+            CommandHandler('start', admin_start),
+        ],
+        allow_reentry=True
+    )
+    main_app.add_handler(cp_conv)
         entry_points=[CommandHandler('bulk', start_bulk_upload)],
         states={
             BULK_WAIT_VIDEO: [
