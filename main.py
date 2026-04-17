@@ -1939,24 +1939,27 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"❌ Poster conversion failed: {e}")
 
-    # ... aapke function ka baaki code ...
+    # ... aapka upar wala poster handling ka code ...
 
-# Fallback: Create placeholder if conversion fails
-if not valid_poster_id:
-    placeholder = await create_placeholder_thumbnail(title)
-    if placeholder:
-        try:
-            temp_photo = await context.bot.send_photo(
-                chat_id=msg.chat_id,
-                photo=placeholder,
-                caption=""
-            )
-            valid_poster_id = temp_photo.photo[-1].file_id
-            await temp_photo.delete()
-            logger.info(f"✅ CP placeholder created")
-        except Exception as e:
-            logger.error(f"❌ Placeholder failed: {e}")
+    # Dhyan dein: Yeh line thodi aage se shuru honi chahiye (Indented)
+    # Fallback: Create placeholder if conversion fails
+    if not valid_poster_id:
+        # Ab await sahi se kaam karega kyunki yeh async function ke andar hai
+        placeholder = await create_placeholder_thumbnail(title)
+        if placeholder:
+            try:
+                temp_photo = await context.bot.send_photo(
+                    chat_id=msg.chat_id,
+                    photo=placeholder,
+                    caption=""
+                )
+                valid_poster_id = temp_photo.photo[-1].file_id
+                await temp_photo.delete()
+                logger.info(f"✅ CP placeholder created")
+            except Exception as e:
+                logger.error(f"❌ Placeholder failed: {e}")
 
+    # Ise bhi same level par indent karein
     await status.edit_text(
         f"✅ <b>Video Uploaded!</b>\n\n"
         f"📝 Title: {html_escape(title)}\n"
