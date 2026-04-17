@@ -1919,18 +1919,19 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         poster_file_id = doc_obj.thumbnail.file_id
     
     # Fallback: placeholder thumbnail
+        # Fallback: placeholder thumbnail
     if not poster_file_id:
         try:
             placeholder = await create_placeholder_thumbnail(title)
             if placeholder:
                 placeholder_msg = await context.bot.send_photo(
-                    chat_id=BACKUP_1,
+                    chat_id=CP_CHANNEL_ID,   # 👈 BACKUP_1 ki jagah CP_CHANNEL_ID
                     photo=placeholder,
                     caption=""
                 )
                 poster_file_id = placeholder_msg.photo[-1].file_id
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Placeholder creation/send failed: {e}")
     
     # Temporary save
     context.user_data['cp_title'] = title
@@ -2856,7 +2857,6 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Header
     header = await msg.reply_text(
         f"🔞 <b>EXCLUSIVE COLLECTION</b>\n\n"
-        f"📊 Total: {len(cp_videos)} videos\n\n"
         f"👇 Click price to buy:",
         parse_mode='HTML'
     )
@@ -2898,8 +2898,8 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=keyboard
                 )
                 asyncio.create_task(schedule_delete(context, chat_id, sent.message_id, TEXT_DELETE_TIME))
-            except:
-                pass
+            except Exception as e:
+                logger.error(f"CP text send error {cp_id}: {e}")  # 👈 Already hai, check logs
         
         await asyncio.sleep(0.5)
 
