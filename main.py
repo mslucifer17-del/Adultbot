@@ -1914,9 +1914,7 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CP_WAIT_VIDEO
     
     # Function ko 'async def' hona zaroori hai
-    # ... aapka pehle ka code ...
 
-    # --- IMPROVED POSTER HANDLING ---
     raw_poster_id = None
     if video_obj and video_obj.thumbnail:
         raw_poster_id = video_obj.thumbnail.file_id
@@ -1927,7 +1925,6 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if raw_poster_id:
         try:
             # Convert thumbnail to VALID photo file_id
-            # Yahan 'await' kaam karega kyunki function 'async' hai aur indentation sahi hai
             temp_photo = await context.bot.send_photo(
                 chat_id=msg.chat_id,  # Use admin chat for temp conversion
                 photo=raw_poster_id,
@@ -1939,12 +1936,8 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"❌ Poster conversion failed: {e}")
 
-    # ... aapka upar wala poster handling ka code ...
-
-    # Dhyan dein: Yeh line thodi aage se shuru honi chahiye (Indented)
     # Fallback: Create placeholder if conversion fails
     if not valid_poster_id:
-        # Ab await sahi se kaam karega kyunki yeh async function ke andar hai
         placeholder = await create_placeholder_thumbnail(title)
         if placeholder:
             try:
@@ -1958,6 +1951,8 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.info(f"✅ CP placeholder created")
             except Exception as e:
                 logger.error(f"❌ Placeholder failed: {e}")
+
+    # ... yahan aapka baaki ka code aayega (status.edit_text aur return) ...
 
     # Ise bhi same level par indent karein
     await status.edit_text(
