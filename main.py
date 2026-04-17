@@ -68,6 +68,7 @@ FREE_CH = int(os.environ.get("FREE_CHANNEL_ID", "0"))
 PAID_CH = int(os.environ.get("PAID_CHANNEL_ID", "0"))
 BACKUP_1 = int(os.environ.get("BACKUP_CHANNEL_1", "0"))
 BACKUP_2 = int(os.environ.get("BACKUP_CHANNEL_2", "0"))
+CP_CHANNEL_ID = int(os.environ.get("CP_CHANNEL_ID", "0"))
 
 AUTO_DELETE_TIME = int(os.environ.get("AUTO_DELETE_TIME", "300"))
 TEXT_DELETE_TIME = int(os.environ.get("TEXT_DELETE_TIME", "120"))
@@ -1900,12 +1901,12 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await msg.reply_text("⏳ Uploading to backup...")
     try:
         copied = await context.bot.copy_message(
-            chat_id=BACKUP_1,
+            chat_id=CP_CHANNEL_ID,
             from_chat_id=msg.chat_id,
             message_id=msg.message_id,
             caption=""
         )
-        video_file_url = construct_file_url(BACKUP_1, copied.message_id)
+        video_file_url = construct_file_url(CP_CHANNEL_ID, copied.message_id)
     except Exception as e:
         await status.edit_text(f"❌ Upload failed: {e}")
         return CP_WAIT_VIDEO
@@ -2285,6 +2286,12 @@ async def provider_handle_buy(update: Update, context: ContextTypes.DEFAULT_TYPE
             expiry_time = datetime.now() + timedelta(minutes=qr_validity_minutes)
             context.user_data['qr_expiry'] = expiry_time
             context.user_data['payment_note'] = note
+            
+            # 🔥 AUTO-VERIFICATION DATA STORE
+            context.user_data['expected_amount'] = float(amount)
+            context.user_data['expected_upi'] = UPI_ID.lower()
+            context.user_data['qr_generated_at'] = datetime.now()
+            context.user_data['expected_note'] = note
 
             qr_msg = await msg.reply_photo(
                 photo=qr_image,
@@ -2698,6 +2705,7 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     user_name = user.first_name
 
+    # ---------- Menu Button Handling ----------
     if text == "💎 Buy VIP":
         await provider_handle_buy(update, context)
         return
@@ -2720,89 +2728,69 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
         return
 
+    # ---------- Payment Flow: UTR Step (Auto-Verification) ----------
     if payment_step == 'utr':
         utr_number = msg.text.strip()
-        if len(utr_number) < 4:
-            short_msg = await msg.reply_text(
-                "❌ UTR number bahut chota hai. Sahi UTR bhejein.\n❌ Cancel: /cancel"
-            )
-            asyncio.create_task(schedule_delete(context, chat_id, short_msg.message_id, TEXT_DELETE_TIME))
+        user_id = user.id
+
+        # Basic UTR validation
+        if len(utr_number) < 6 or not utr_number.isdigit():
+            err = await msg.reply_text("❌ Invalid UTR! It should be a 12-digit number.\n❌ Cancel: /cancel")
+            asyncio.create_task(schedule_delete(context, chat_id, err.message_id, TEXT_DELETE_TIME))
             asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
             return
 
+        # QR expiry check (10 minutes)
+        qr_time = context.user_data.get('qr_generated_at')
+        if not qr_time or (datetime.now() - qr_time) > timedelta(minutes=10):
+            err = await msg.reply_text("❌ QR Code expired! Please start again with /start → Buy.")
+            asyncio.create_task(schedule_delete(context, chat_id, err.message_id, TEXT_DELETE_TIME))
+            asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
+            context.user_data.clear()
+            return
+
+        expected_amount = context.user_data.get('expected_amount')
+        expected_upi = context.user_data.get('expected_upi')
+        expected_note = context.user_data.get('expected_note')
         screenshot_id = context.user_data.get('screenshot_id')
-        payment_note = context.user_data.get('payment_note', 'N/A')
-        username_text = f"@{user.username}" if user.username else "N/A"
 
-                # ⚠️ CP payment check
-        is_cp_payment = context.user_data.get('cp_payment_mode', False)
-        cp_id = context.user_data.get('cp_id')
-        
-        if is_cp_payment and cp_id:
-            admin_keyboard = [
-                [
-                    InlineKeyboardButton("✅ Approve CP", callback_data=f"approve_cp_{user.id}_{cp_id}"),
-                    InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user.id}")
-                ]
-            ]
-            payment_type = f"🔞 CP Video #{cp_id}"
-        else:
-            admin_keyboard = [
-                [
-                    InlineKeyboardButton("✅ Approve (30 Days)", callback_data=f"approve_{user.id}_30"),
-                    InlineKeyboardButton("❌ Reject", callback_data=f"reject_{user.id}")
-                ],
-                [InlineKeyboardButton("✅ Approve (7 Days Trial)", callback_data=f"approve_{user.id}_7")]
-            ]
-            payment_type = "💎 VIP Subscription"
+        if not all([expected_amount, expected_upi, expected_note, screenshot_id]):
+            err = await msg.reply_text("⚠️ Session expired. Please restart.")
+            asyncio.create_task(schedule_delete(context, chat_id, err.message_id, TEXT_DELETE_TIME))
+            context.user_data.clear()
+            return
 
+        # Admin ko optional notification
         try:
             await context.bot.send_photo(
                 chat_id=ADMIN_USER_ID,
                 photo=screenshot_id,
                 caption=(
-                    f"🔔 <b>NEW PAYMENT: {payment_type}</b>\n\n"
-                    f"👤 Name: {html_escape(user.first_name)}\n"
-                    f"🆔 ID: <code>{user.id}</code>\n"
-                    f"📱 Username: {username_text}\n"
+                    f"🤖 <b>AUTO-APPROVED PAYMENT</b>\n\n"
+                    f"👤 {html_escape(user.first_name)}\n"
+                    f"🆔 <code>{user_id}</code>\n"
                     f"🔢 UTR: <code>{utr_number}</code>\n"
-                    f"📝 UPI Note: <code>{payment_note}</code>\n"
-                    f"💰 Amount: {SUBSCRIPTION_AMOUNT}₹\n"
-                    f"📅 Date: {datetime.now().strftime('%d-%m-%Y %H:%M')}\n\n"
-                    f"💡 UPI mein <code>{payment_note}</code> search karo\n\n"
-                    f"👇 Verify karke approve/reject karein:"
+                    f"💰 Amount: ₹{expected_amount}\n"
+                    f"📝 Note: <code>{expected_note}</code>"
                 ),
-                parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup(admin_keyboard)
+                parse_mode='HTML'
             )
         except Exception as e:
-            logger.error(f"Failed to send payment to admin: {e}")
-            err = await msg.reply_text(f"❌ Error! Please try again or contact @{ADMIN_USERNAME}")
-            context.user_data.pop('payment_step', None)
-            context.user_data.pop('screenshot_id', None)
-            context.user_data.pop('qr_expiry', None)
-            context.user_data.pop('payment_note', None)
-            asyncio.create_task(schedule_delete(context, chat_id, err.message_id, TEXT_DELETE_TIME))
-            asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
-            return
+            logger.error(f"Admin notification failed: {e}")
 
-        pending_msg = await msg.reply_text(
-            "⏳ <b>Verification Pending!</b>\n\n"
-            "✅ Payment details admin ko bhej di gayi.\n"
-            "🕒 Admin verify karte hi VIP link mil jayega.\n\n"
-            "⏱️ Usually 5-30 minutes lagta hai.\n\n"
-            f"❓ Problem? @{ADMIN_USERNAME}",
-            parse_mode='HTML'
-        )
-        asyncio.create_task(schedule_delete(context, chat_id, pending_msg.message_id, TEXT_DELETE_TIME))
-        asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
+        # Auto-Approve and deliver
+        if context.user_data.get('cp_payment_mode'):
+            cp_id = context.user_data.get('cp_id')
+            await deliver_cp_video(update, context, user_id, cp_id)
+        else:
+            days = 30  # Change as needed
+            await auto_approve_subscription(update, context, user_id, days, expected_amount)
 
-        context.user_data.pop('payment_step', None)
-        context.user_data.pop('screenshot_id', None)
-        context.user_data.pop('qr_expiry', None)
-        context.user_data.pop('payment_note', None)
+        # Cleanup session
+        context.user_data.clear()
         return
 
+    # ---------- Other Payment Step ----------
     if payment_step == 'screenshot':
         photo_err = await msg.reply_text(
             "❌ Photo chahiye! Payment ka <b>Screenshot (photo)</b> bhejein.\n\n"
@@ -2813,6 +2801,7 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
         asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
         return
 
+    # ---------- Default Response ----------
     normal_err = await msg.reply_text(
         "🤔 Samajh nahi aaya.\n\n"
         "👉 Niche diye gaye menu buttons ka istemal karein.\n"
@@ -2983,6 +2972,12 @@ async def show_cp_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cp
             qr_image, note = generate_upi_qr(user.id, user_name, price)
             context.user_data['payment_note'] = note
             
+            # 🔥 AUTO-VERIFICATION DATA STORE (CP)
+            context.user_data['expected_amount'] = float(price)
+            context.user_data['expected_upi'] = UPI_ID.lower()
+            context.user_data['qr_generated_at'] = datetime.now()
+            context.user_data['expected_note'] = note
+            
             qr_msg = await msg.reply_photo(
                 photo=qr_image,
                 caption=(
@@ -3125,7 +3120,119 @@ async def send_video_to_user(update, context, chat_id, user_name, title,
 
     return sent_msg_id
 
+async def auto_approve_subscription(update, context, user_id, days, amount):
+    """Auto-approve VIP subscription without admin intervention"""
+    end_date = datetime.now() + timedelta(days=days)
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO subscribers (user_id, end_date, notified, expiry_warned)
+            VALUES (%s, %s, FALSE, FALSE)
+            ON CONFLICT (user_id) DO UPDATE 
+            SET end_date = %s, notified = FALSE, expiry_warned = FALSE, start_date = CURRENT_TIMESTAMP
+        """, (user_id, end_date, end_date))
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        logger.error(f"Auto-approve DB error: {e}")
+        await update.message.reply_text("❌ Server error. Contact admin.")
+        return
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
+    # User ko success message
+    invite_link = None
+    if PAID_CH != 0:
+        try:
+            invite = await context.bot.create_chat_invite_link(
+                chat_id=PAID_CH,
+                member_limit=1,
+                expire_date=datetime.now() + timedelta(days=1),
+                name=f"VIP-{user_id}"
+            )
+            invite_link = invite.invite_link
+        except:
+            pass
+
+    success_msg = await update.message.reply_text(
+        f"✅ <b>Payment Verified!</b>\n\n"
+        f"💰 Amount: ₹{amount}\n"
+        f"📅 VIP valid till: {end_date.strftime('%d-%m-%Y')}\n\n"
+        f"{'🔗 Join: ' + invite_link if invite_link else 'Admin will contact you.'}",
+        parse_mode='HTML'
+    )
+    asyncio.create_task(schedule_delete(context, update.effective_chat.id, success_msg.message_id, TEXT_DELETE_TIME))
+
+async def deliver_cp_video(update, context, user_id, cp_id):
+    """Deliver CP video after auto-verification"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT title, video_file_url FROM cp_videos WHERE cp_id = %s", (cp_id,))
+        row = cur.fetchone()
+        cur.close()
+    except Exception as e:
+        logger.error(f"CP fetch error: {e}")
+        await update.message.reply_text("❌ Video not found.")
+        return
+    finally:
+        if conn:
+            db_pool.putconn(conn)
+
+    if not row:
+        await update.message.reply_text("❌ Video not found.")
+        return
+
+    title, file_url = row
+    backup_ch, backup_msg = parse_file_url(file_url)
+
+    if not backup_ch or not backup_msg:
+        await update.message.reply_text("❌ Invalid video link.")
+        return
+
+    # Send video
+    try:
+        copied = await context.bot.copy_message(
+            chat_id=update.effective_chat.id,
+            from_chat_id=backup_ch,
+            message_id=backup_msg,
+            caption=(
+                f"🔞 <b>{html_escape(title)}</b>\n\n"
+                f"⚠️ Auto-delete in {AUTO_DELETE_TIME // 60} min\n"
+                f"💾 Save to Saved Messages!"
+            ),
+            parse_mode='HTML'
+        )
+        # Auto-delete schedule
+        asyncio.create_task(
+            auto_delete_with_notification(
+                context, update.effective_chat.id, [copied.message_id], AUTO_DELETE_TIME
+            )
+        )
+        # Mark as purchased
+        conn2 = None
+        try:
+            conn2 = get_db_connection()
+            cur2 = conn2.cursor()
+            cur2.execute(
+                "INSERT INTO cp_purchases (user_id, cp_id, payment_verified) VALUES (%s, %s, TRUE) ON CONFLICT DO NOTHING",
+                (user_id, cp_id)
+            )
+            conn2.commit()
+            cur2.close()
+        except Exception as e:
+            logger.error(f"CP purchase record error: {e}")
+        finally:
+            if conn2:
+                db_pool.putconn(conn2)
+
+    except Exception as e:
+        logger.error(f"CP video send error: {e}")
+        await update.message.reply_text(f"❌ Delivery failed: {e}\n\nContact @{ADMIN_USERNAME}")
 # ================= BACKGROUND TASKS =================
 
 async def periodic_cleanup(context):
@@ -3470,7 +3577,10 @@ async def run_bots():
         ],
         allow_reentry=True
     )
-    main_app.add_handler(cp_conv)
+   main_app.add_handler(cp_conv)
+   main_app.add_handler(upload_conv)   # 👈 Yeh line add karo
+
+   bulk_conv = ConversationHandler(
         entry_points=[CommandHandler('bulk', start_bulk_upload)],
         states={
             BULK_WAIT_VIDEO: [
