@@ -2862,11 +2862,10 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
 # ================================================================
 
 async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """CP videos list with posters as a media album"""
+    """CP videos list with posters as a media album (fallback to individual send)"""
     msg = update.message
     chat_id = msg.chat_id
-    user = update.effective_user
-    
+
     # Fetch CP videos
     conn = None
     cp_videos = []
@@ -2884,7 +2883,7 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     finally:
         if conn:
             db_pool.putconn(conn)
-    
+
     if not cp_videos:
         await msg.reply_text(
             "❌ <b>No videos available!</b>\n\n"
@@ -2892,17 +2891,101 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML'
         )
         return
-    
+
     # Delete user's start message
     asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 5))
-    
+
     # Header
     header = await msg.reply_text(
         f"🔞 <b>EXCLUSIVE COLLECTION</b>\n\n"
-        f"🖼️ <i>Swipe to see all posters. To buy, send the Video ID shown in the caption.</i>",
+        f"🖼️ <i>Posters loading...</i>",
         parse_mode='HTML'
     )
-    asyncio.create_task(schedule_delete(context, chat_id, header.message_id, TEXT_DELETE_TIME))
+
+    # Prepare media group items (filter out invalid posters)
+    media_group = []
+    for (cp_id, title, poster_id, price) in cp_videos:
+        if not poster_id:
+            continue
+        caption = (
+            f"🎬 <b>{html_escape(title[:60])}</b>\n"
+            f"💰 Price: <b>₹{price}</b>\n"
+            f"🆔 Video ID: <code>{cp_id}</code>"
+        )
+        media_group.append(
+            InputMediaPhoto(
+                media=poster_id,
+                caption=caption,
+                parse_mode='HTML'
+            )
+        )
+
+    if not media_group:
+        await header.edit_text("❌ No posters available to display.")
+        return
+
+    # Attempt to send as album
+    album_success = False
+    try:
+        chunk_size = 10
+        for i in range(0, len(media_group), chunk_size):
+            chunk = media_group[i:i+chunk_size]
+            await context.bot.send_media_group(chat_id=chat_id, media=chunk)
+            await asyncio.sleep(1)
+        album_success = True
+        logger.info(f"CP album sent successfully with {len(media_group)} items")
+    except Exception as e:
+        logger.error(f"CP album send failed: {e}. Falling back to individual photos.")
+
+    # If album failed, send individually with fallback to text
+    if not album_success:
+        await header.edit_text(
+            f"🔞 <b>EXCLUSIVE COLLECTION</b>\n\n"
+            f"🖼️ <i>Showing posters one by one...</i>",
+            parse_mode='HTML'
+        )
+        for (cp_id, title, poster_id, price) in cp_videos:
+            caption = (
+                f"🎬 <b>{html_escape(title[:60])}</b>\n"
+                f"💰 Price: <b>₹{price}</b>\n"
+                f"🆔 Video ID: <code>{cp_id}</code>"
+            )
+            sent = False
+            if poster_id:
+                try:
+                    await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=poster_id,
+                        caption=caption,
+                        parse_mode='HTML'
+                    )
+                    sent = True
+                except Exception as photo_err:
+                    logger.warning(f"Individual CP photo failed for {cp_id}: {photo_err}")
+
+            if not sent:
+                # Fallback to text
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=caption,
+                        parse_mode='HTML'
+                    )
+                except Exception as text_err:
+                    logger.error(f"CP text fallback failed: {text_err}")
+
+            await asyncio.sleep(0.5)
+
+    # Instruction message
+    instruction = await msg.reply_text(
+        f"👉 <b>How to Buy:</b>\n\n"
+        f"1️⃣ Find the Video ID in the caption of the poster you like.\n"
+        f"2️⃣ Send that Video ID to me here.\n"
+        f"3️⃣ I will give you the payment QR.\n\n"
+        f"📌 <i>Example: just type</i> <code>123</code>",
+        parse_mode='HTML'
+    )
+    asyncio.create_task(schedule_delete(context, chat_id, instruction.message_id, TEXT_DELETE_TIME * 2))
     
     # Prepare media group
     media_group = []
