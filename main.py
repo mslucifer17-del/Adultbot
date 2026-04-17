@@ -1913,28 +1913,33 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text(f"❌ Upload failed: {e}")
         return CP_WAIT_VIDEO
     
-    # In get_cp_video function, replace the poster handling section with:
-# --- IMPROVED POSTER HANDLING ---
-raw_poster_id = None
-if video_obj and video_obj.thumbnail:
-    raw_poster_id = video_obj.thumbnail.file_id
-elif doc_obj and doc_obj.thumbnail:
-    raw_poster_id = doc_obj.thumbnail.file_id
+    # Function ko 'async def' hona zaroori hai
+    # ... aapka pehle ka code ...
 
-valid_poster_id = None
-if raw_poster_id:
-    try:
-        # Convert thumbnail to VALID photo file_id
-        temp_photo = await context.bot.send_photo(
-            chat_id=msg.chat_id,  # Use admin chat for temp conversion
-            photo=raw_poster_id,
-            caption=""
-        )
-        valid_poster_id = temp_photo.photo[-1].file_id
-        await temp_photo.delete()
-        logger.info(f"✅ CP poster converted: thumbnail → photo file_id")
-    except Exception as e:
-        logger.error(f"❌ Poster conversion failed: {e}")
+    # --- IMPROVED POSTER HANDLING ---
+    raw_poster_id = None
+    if video_obj and video_obj.thumbnail:
+        raw_poster_id = video_obj.thumbnail.file_id
+    elif doc_obj and doc_obj.thumbnail:
+        raw_poster_id = doc_obj.thumbnail.file_id
+
+    valid_poster_id = None
+    if raw_poster_id:
+        try:
+            # Convert thumbnail to VALID photo file_id
+            # Yahan 'await' kaam karega kyunki function 'async' hai aur indentation sahi hai
+            temp_photo = await context.bot.send_photo(
+                chat_id=msg.chat_id,  # Use admin chat for temp conversion
+                photo=raw_poster_id,
+                caption=""
+            )
+            valid_poster_id = temp_photo.photo[-1].file_id
+            await temp_photo.delete()
+            logger.info(f"✅ CP poster converted: thumbnail → photo file_id")
+        except Exception as e:
+            logger.error(f"❌ Poster conversion failed: {e}")
+
+    # ... aapke function ka baaki code ...
 
 # Fallback: Create placeholder if conversion fails
 if not valid_poster_id:
