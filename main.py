@@ -2862,11 +2862,9 @@ async def provider_handle_text(update: Update, context: ContextTypes.DEFAULT_TYP
 # ================================================================
 
 async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """CP videos list with posters as a media album (fallback to individual send)"""
     msg = update.message
     chat_id = msg.chat_id
 
-    # Fetch CP videos
     conn = None
     cp_videos = []
     try:
@@ -2885,104 +2883,60 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             db_pool.putconn(conn)
 
     if not cp_videos:
-        await msg.reply_text(
-            "❌ <b>No videos available!</b>\n\n"
-            "🔔 Check back later.",
-            parse_mode='HTML'
-        )
+        await msg.reply_text("❌ <b>No videos available!</b>\n\n🔔 Check back later.", parse_mode='HTML')
         return
 
-    # Delete user's start message
     asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 5))
 
-    # Header
-    header = await msg.reply_text(
-        f"🔞 <b>EXCLUSIVE COLLECTION</b>\n\n"
-        f"🖼️ <i>Posters loading...</i>",
-        parse_mode='HTML'
-    )
+    header = await msg.reply_text("🔞 <b>EXCLUSIVE COLLECTION</b>\n\n🖼️ <i>Loading posters...</i>", parse_mode='HTML')
 
-    # Prepare media group items (filter out invalid posters)
+    # 先尝试转换所有 poster_file_id 为有效的 photo file_id
+    valid_posters = []
+    for cp_id, title, poster_id, price in cp_videos:
+        valid_id = poster_id
+        if poster_id:
+            try:
+                # 尝试发送为照片并立即删除，以获取真正的 photo file_id
+                temp = await context.bot.send_photo(chat_id=chat_id, photo=poster_id)
+                valid_id = temp.photo[-1].file_id
+                await temp.delete()
+            except Exception:
+                valid_id = None  # 彻底无效
+        valid_posters.append((cp_id, title, valid_id, price))
+
+    # 构建媒体组（只使用有效的 photo id）
     media_group = []
-    for (cp_id, title, poster_id, price) in cp_videos:
+    for cp_id, title, poster_id, price in valid_posters:
         if not poster_id:
             continue
-        caption = (
-            f"🎬 <b>{html_escape(title[:60])}</b>\n"
-            f"💰 Price: <b>₹{price}</b>\n"
-            f"🆔 Video ID: <code>{cp_id}</code>"
-        )
-        media_group.append(
-            InputMediaPhoto(
-                media=poster_id,
-                caption=caption,
-                parse_mode='HTML'
-            )
-        )
+        caption = f"🎬 <b>{html_escape(title[:60])}</b>\n💰 Price: <b>₹{price}</b>\n🆔 Video ID: <code>{cp_id}</code>"
+        media_group.append(InputMediaPhoto(media=poster_id, caption=caption, parse_mode='HTML'))
 
-    if not media_group:
-        await header.edit_text("❌ No posters available to display.")
-        return
-
-    # Attempt to send as album
     album_success = False
-    try:
-        chunk_size = 10
-        for i in range(0, len(media_group), chunk_size):
-            chunk = media_group[i:i+chunk_size]
-            await context.bot.send_media_group(chat_id=chat_id, media=chunk)
-            await asyncio.sleep(1)
-        album_success = True
-        logger.info(f"CP album sent successfully with {len(media_group)} items")
-    except Exception as e:
-        logger.error(f"CP album send failed: {e}. Falling back to individual photos.")
+    if media_group:
+        try:
+            for i in range(0, len(media_group), 10):
+                await context.bot.send_media_group(chat_id=chat_id, media=media_group[i:i+10])
+                await asyncio.sleep(1)
+            album_success = True
+        except Exception as e:
+            logger.warning(f"Album send failed: {e}, falling back to individual send")
 
-    # If album failed, send individually with fallback to text
     if not album_success:
-        await header.edit_text(
-            f"🔞 <b>EXCLUSIVE COLLECTION</b>\n\n"
-            f"🖼️ <i>Showing posters one by one...</i>",
-            parse_mode='HTML'
-        )
-        for (cp_id, title, poster_id, price) in cp_videos:
-            caption = (
-                f"🎬 <b>{html_escape(title[:60])}</b>\n"
-                f"💰 Price: <b>₹{price}</b>\n"
-                f"🆔 Video ID: <code>{cp_id}</code>"
-            )
-            sent = False
+        await header.edit_text("🔞 <b>EXCLUSIVE COLLECTION</b>\n\n🖼️ <i>Showing posters one by one...</i>", parse_mode='HTML')
+        for cp_id, title, poster_id, price in valid_posters:
+            caption = f"🎬 <b>{html_escape(title[:60])}</b>\n💰 Price: <b>₹{price}</b>\n🆔 Video ID: <code>{cp_id}</code>"
             if poster_id:
                 try:
-                    await context.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=poster_id,
-                        caption=caption,
-                        parse_mode='HTML'
-                    )
-                    sent = True
-                except Exception as photo_err:
-                    logger.warning(f"Individual CP photo failed for {cp_id}: {photo_err}")
-
-            if not sent:
-                # Fallback to text
-                try:
-                    await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=caption,
-                        parse_mode='HTML'
-                    )
-                except Exception as text_err:
-                    logger.error(f"CP text fallback failed: {text_err}")
-
+                    await context.bot.send_photo(chat_id=chat_id, photo=poster_id, caption=caption, parse_mode='HTML')
+                except Exception:
+                    await context.bot.send_message(chat_id=chat_id, text=caption, parse_mode='HTML')
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=caption, parse_mode='HTML')
             await asyncio.sleep(0.5)
 
-    # Instruction message
     instruction = await msg.reply_text(
-        f"👉 <b>How to Buy:</b>\n\n"
-        f"1️⃣ Find the Video ID in the caption of the poster you like.\n"
-        f"2️⃣ Send that Video ID to me here.\n"
-        f"3️⃣ I will give you the payment QR.\n\n"
-        f"📌 <i>Example: just type</i> <code>123</code>",
+        "👉 <b>How to Buy:</b>\n\n1️⃣ Find the Video ID in the caption.\n2️⃣ Send that ID to me.\n3️⃣ Get payment QR.\n\n📌 Example: <code>123</code>",
         parse_mode='HTML'
     )
     asyncio.create_task(schedule_delete(context, chat_id, instruction.message_id, TEXT_DELETE_TIME * 2))
