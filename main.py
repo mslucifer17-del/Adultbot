@@ -2678,6 +2678,11 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
         except:
             pass
         return
+            # ⚠️ NEW: CP direct buy button handler
+    if data.startswith("cp_buy_"):
+        cp_id = int(data.split("_")[2])
+        await show_cp_payment(update, context, cp_id)
+        return
 
 
 async def provider_handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2871,10 +2876,10 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     chat_id = msg.chat_id
     user = update.effective_user
-    user_name = user.first_name
 
-    logger.info(f"CP list requested by user {user.id} ({user_name})")
+    logger.info(f"CP list requested by user {user.id}")
 
+    # 1. Database से सारी CP videos लाएँ
     conn = None
     cp_videos = []
     try:
@@ -2895,145 +2900,42 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not cp_videos:
         await msg.reply_text("❌ <b>No videos available!</b>\n\n🔔 Check back later.", parse_mode='HTML')
-        asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, TEXT_DELETE_TIME))
         return
 
-    # Delete start message
-    asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 5))
+    # स्टार्ट मैसेज को डिलीट करें
+    await msg.delete()
 
-    # Loading message
-    loading_msg = await msg.reply_text("🔞 <b>EXCLUSIVE COLLECTION</b>\n\n🖼️ <i>Converting posters...</i>", parse_mode='HTML')
-
-    # 🔥 STEP 1: Convert ALL thumbnails to valid photo file_ids FIRST
-    valid_media = []
-    conversion_success = 0
-    
+    # 2. हर वीडियो को अलग-अलग भेजें, साथ में बटन
     for cp_id, title, poster_id, price in cp_videos:
         if not poster_id:
-            logger.warning(f"CP {cp_id}: No poster, skipping")
-            continue
-            
-        valid_photo_id = None
-        
+            continue   # बिना पोस्टर वाली वीडियो छोड़ दें
+
+        # कैप्शन तैयार करें
+        caption = f"🎬 <b>{html_escape(title[:80])}</b>\n\n💰 <b>Price:</b> ₹{price}"
+
+        # 🔥 इनलाइन बटन बनाएँ (बटन पर ही प्राइस दिखेगा)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"💸 Buy for ₹{price}", callback_data=f"cp_buy_{cp_id}")]
+        ])
+
         try:
-            # Convert thumbnail → valid photo file_id
-            temp_msg = await context.bot.send_photo(
+            await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=poster_id,
-                caption=""
+                caption=caption,
+                parse_mode='HTML',
+                reply_markup=keyboard
             )
-            valid_photo_id = temp_msg.photo[-1].file_id  # ✅ This is VALID photo file_id
-            await temp_msg.delete()  # Clean up temp message
-            conversion_success += 1
-            logger.info(f"✅ CP {cp_id}: Thumbnail converted to photo")
         except Exception as e:
-            logger.error(f"❌ CP {cp_id} conversion failed: {e}")
-            continue
-        
-        # Build caption for media group
-        caption = (
-            f"🎬 <b>{html_escape(title[:55])}</b>\n"
-            f"💰 Price: <b>₹{price}</b>\n"
-            f"🆔 ID: <code>{cp_id}</code>"
-        )
-        
-        valid_media.append(
-            InputMediaPhoto(
-                media=valid_photo_id,  # ✅ Now using VALID photo file_id
-                caption=caption,
-                parse_mode='HTML'
+            logger.error(f"❌ Failed to send poster for CP {cp_id}: {e}")
+            # फेल होने पर टेक्स्ट फॉलबैक
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"{caption}\n\n🆔 ID: <code>{cp_id}</code>",
+                parse_mode='HTML',
+                reply_markup=keyboard
             )
-        )
-    
-    await loading_msg.delete()
-
-    if not valid_media:
-        await msg.reply_text(
-            "❌ <b>No valid posters available!</b>\n\n"
-            "Admin ko batao posters missing hain.",
-            parse_mode='HTML'
-        )
-        return
-
-    logger.info(f"✅ {conversion_success}/{len(cp_videos)} posters converted successfully")
-
-    # 🔥 STEP 2: Send media groups (max 10 per group)
-    try:
-        chunk_size = 10
-        for i in range(0, len(valid_media), chunk_size):
-            chunk = valid_media[i:i+chunk_size]
-            await context.bot.send_media_group(chat_id=chat_id, media=chunk)
-            logger.info(f"✅ Sent media group {i//chunk_size + 1} ({len(chunk)} items)")
-            await asyncio.sleep(1)  # Rate limit protection
-        
-    except Exception as e:
-        logger.error(f"❌ Media group send failed: {e}")
-        await msg.reply_text("❌ Failed to send posters. Try /start cp_list again.")
-        return
-
-    # 🔥 STEP 3: Instructions
-    instruction = await context.bot.send_message(
-        chat_id=chat_id,
-        text=(
-            "👉 <b>How to Buy:</b>\n\n"
-            "1️⃣ Copy Video ID from poster caption\n"
-            "2️⃣ Send that ID here\n"
-            "3️⃣ Get payment QR\n\n"
-            f"📌 <b>Example:</b> <code>123</code>\n\n"
-            f"🔞 Total: {len(valid_media)} videos"
-        ),
-        parse_mode='HTML',
-        disable_web_page_preview=True
-    )
-    asyncio.create_task(schedule_delete(context, chat_id, instruction.message_id, TEXT_DELETE_TIME * 2))
-    
-    # Prepare media group
-    media_group = []
-    for (cp_id, title, poster_id, price) in cp_videos:
-        if not poster_id:
-            logger.warning(f"CP video {cp_id} has no poster, skipping from album")
-            continue
-            
-        caption = (
-            f"🎬 <b>{html_escape(title[:60])}</b>\n"
-            f"💰 Price: <b>₹{price}</b>\n"
-            f"🆔 Video ID: <code>{cp_id}</code>"
-        )
-        
-        media_group.append(
-            InputMediaPhoto(
-                media=poster_id,
-                caption=caption,
-                parse_mode='HTML'
-            )
-        )
-    
-    if not media_group:
-        await msg.reply_text("❌ No posters available to display.")
-        return
-        
-    try:
-        # Send album (max 10 media per group, Telegram limit)
-        chunk_size = 10
-        for i in range(0, len(media_group), chunk_size):
-            chunk = media_group[i:i+chunk_size]
-            await context.bot.send_media_group(chat_id=chat_id, media=chunk)
-            await asyncio.sleep(1)  # Rate limit से बचने के लिए
-        
-        # Instruction message
-        instruction = await msg.reply_text(
-            f"👉 <b>How to Buy:</b>\n\n"
-            f"1️⃣ Find the Video ID in the caption of the poster you like.\n"
-            f"2️⃣ Send that Video ID to me here.\n"
-            f"3️⃣ I will give you the payment QR.\n\n"
-            f"📌 <i>Example: just type</i> <code>123</code>",
-            parse_mode='HTML'
-        )
-        asyncio.create_task(schedule_delete(context, chat_id, instruction.message_id, TEXT_DELETE_TIME * 2))
-        
-    except Exception as e:
-        logger.error(f"Failed to send CP media group: {e}")
-        await msg.reply_text("❌ Failed to send posters. Please try again later.")
+        await asyncio.sleep(0.5)   # Telegram rate limit से बचने के लिए थोड़ा रुकें
 
 
 async def show_cp_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cp_id: int):
