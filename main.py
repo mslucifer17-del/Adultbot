@@ -3717,6 +3717,24 @@ async def run_bots():
         allow_reentry=True
     )
     
+    # 📦 Bulk Conversation Handler
+    bulk_conv = ConversationHandler(
+        entry_points=[CommandHandler('bulk', start_bulk_upload)],
+        states={
+            BULK_WAIT_VIDEO: [
+                CommandHandler('done', process_bulk_video),
+                CommandHandler('cancel', cancel_admin_flow),
+                CommandHandler('start', admin_start),
+                MessageHandler(filters.ALL & ~filters.COMMAND, process_bulk_video),
+            ]
+        },
+        fallbacks=[
+            CommandHandler('cancel', cancel_admin_flow),
+            CommandHandler('start', admin_start),
+        ],
+        allow_reentry=True
+    )
+    
     # Isko add karna zaroori hai, warna cp_conv kaam nahi karega
     main_app.add_handler(cp_conv) 
     
