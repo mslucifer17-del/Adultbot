@@ -2939,11 +2939,11 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_cp_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cp_id: int):
-    """CP video payment QR"""
-    # Check if called from callback query or direct message
+    """CP video payment QR with auto-delete"""
+    # Callback या direct message दोनों संभालें
     if update.callback_query:
         query = update.callback_query
-        await query.answer()  # Important: acknowledge the button press
+        await query.answer()
         msg = query.message
         chat_id = msg.chat_id
         user = query.from_user
@@ -2951,10 +2951,10 @@ async def show_cp_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cp
         msg = update.message
         chat_id = msg.chat_id
         user = update.effective_user
-    
+
     user_name = user.first_name
-    
-    # Check already purchased
+
+    # चेक करें कि पहले ही खरीदा तो नहीं
     conn = None
     already_bought = False
     try:
@@ -2972,12 +2972,13 @@ async def show_cp_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cp
     finally:
         if conn:
             db_pool.putconn(conn)
-    
+
     if already_bought:
+        # पहले से खरीदा है तो वीडियो भेजें
         await send_cp_video(update, context, cp_id)
         return
-    
-    # Fetch CP details
+
+    # CP वीडियो की जानकारी लें
     conn = None
     cp_data = None
     try:
@@ -2994,34 +2995,33 @@ async def show_cp_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cp
     finally:
         if conn:
             db_pool.putconn(conn)
-    
+
     if not cp_data:
-        await msg.reply_text("❌ Video not found!")
+        err = await context.bot.send_message(chat_id=chat_id, text="❌ Video not found!")
+        asyncio.create_task(schedule_delete(context, chat_id, err.message_id, TEXT_DELETE_TIME))
         return
-    
+
     title, price = cp_data
-    
-    # Payment mode activate
+
+    # पेमेंट मोड एक्टिवेट करें
     context.user_data['cp_payment_mode'] = True
     context.user_data['cp_id'] = cp_id
     context.user_data['payment_step'] = 'screenshot'
-    
-    # Delete start message
-    asyncio.create_task(schedule_delete(context, chat_id, msg.message_id, 5))
-    
-    # QR generate
+
+    # QR बनाएँ और भेजें
     try:
         if QR_AVAILABLE:
             qr_image, note = generate_upi_qr(user.id, user_name, price)
             context.user_data['payment_note'] = note
-            
-            # 🔥 AUTO-VERIFICATION DATA STORE (CP)
+
+            # ऑटो-वेरिफिकेशन डेटा स्टोर करें
             context.user_data['expected_amount'] = float(price)
             context.user_data['expected_upi'] = UPI_ID.lower()
             context.user_data['qr_generated_at'] = datetime.now()
             context.user_data['expected_note'] = note
-            
-            qr_msg = await msg.reply_photo(
+
+            qr_msg = await context.bot.send_photo(
+                chat_id=chat_id,
                 photo=qr_image,
                 caption=(
                     f"🔞 <b>{html_escape(title[:50])}</b>\n\n"
@@ -3035,24 +3035,30 @@ async def show_cp_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cp
                 ),
                 parse_mode='HTML'
             )
+            # ✅ ऑटो-डिलीट शेड्यूल करें
             asyncio.create_task(schedule_delete(context, chat_id, qr_msg.message_id, QR_DELETE_TIME))
         else:
             raise Exception("QR unavailable")
     except:
+        # QR नहीं बन पाया तो टेक्स्ट फ़ॉलबैक
         note = f"CP-{user.id}-{cp_id}"
         context.user_data['payment_note'] = note
-        fallback = await msg.reply_text(
-            f"🔞 <b>{html_escape(title[:50])}</b>\n\n"
-            f"💰 Price: <b>₹{price}</b>\n\n"
-            f"💳 UPI: <code>{UPI_ID}</code>\n"
-            f"📝 Note: <code>{note}</code>\n\n"
-            f"Steps:\n"
-            f"1️⃣ Pay ₹{price}\n"
-            f"2️⃣ Screenshot bhejo\n"
-            f"3️⃣ UTR bhejo\n\n"
-            f"❌ Cancel: /cancel",
+        fallback = await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"🔞 <b>{html_escape(title[:50])}</b>\n\n"
+                f"💰 Price: <b>₹{price}</b>\n\n"
+                f"💳 UPI: <code>{UPI_ID}</code>\n"
+                f"📝 Note: <code>{note}</code>\n\n"
+                f"Steps:\n"
+                f"1️⃣ Pay ₹{price}\n"
+                f"2️⃣ Screenshot bhejo\n"
+                f"3️⃣ UTR bhejo\n\n"
+                f"❌ Cancel: /cancel"
+            ),
             parse_mode='HTML'
         )
+        # ✅ ऑटो-डिलीट शेड्यूल करें
         asyncio.create_task(schedule_delete(context, chat_id, fallback.message_id, QR_DELETE_TIME))
 
 
