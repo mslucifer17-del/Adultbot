@@ -88,7 +88,7 @@ MESSAGE_TEXT_LIMIT = 4096
 
 WAIT_TRIM, WAIT_FULL = range(2)
 BULK_WAIT_VIDEO, BULK_CONFIRM = range(2)
-CP_WAIT_VIDEO, CP_WAIT_AMOUNT = range(10, 12)  # CP conversation states
+CP_WAIT_VIDEO, CP_WAIT_IMAGE, CP_WAIT_AMOUNT = range(10, 13)  # CP conversation states  # CP conversation states
 
 print("✅ Environment variables loaded")
 
@@ -1842,7 +1842,7 @@ async def finalize_bulk_upload(update: Update, context: ContextTypes.DEFAULT_TYP
 # ================================================================
 
 async def start_cp_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin-only CP batch upload start"""
+    """Admin-only CP batch upload start - modified flow"""
     if update.effective_user.id not in ADMIN_USER_IDS:
         await update.message.reply_text("❌ Access Denied!")
         return ConversationHandler.END
@@ -1857,8 +1857,11 @@ async def start_cp_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🔞 <b>CP VIDEO UPLOAD MODE</b>\n\n"
         "⚠️ <b>WARNING: ILLEGAL CONTENT!</b>\n\n"
-        "📹 <b>Step 1:</b> Video bhejo\n"
-        "   (Poster automatic extract hoga)\n\n"
+        "📹 <b>Step 1:</b> Video bhejo (forward ya direct)\n"
+        "   (Video CP channel mein save hoga)\n\n"
+        "🖼️ <b>Step 2:</b> Poster image bhejo\n"
+        "   (Yeh photo free channel mein dikhega)\n\n"
+        "💰 <b>Step 3:</b> Amount (₹) type karo\n\n"
         "❌ Cancel: /cancel",
         parse_mode='HTML'
     )
@@ -1866,7 +1869,7 @@ async def start_cp_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """CP video receive aur backup mein upload with valid poster conversion"""
+    """CP video receive and backup, then ask for poster image"""
     msg = update.message
     
     if msg.text and msg.text.strip().lower() == '/cancel':
@@ -1878,21 +1881,16 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Video file bhejo! Ya /cancel")
         return CP_WAIT_VIDEO
     
-    # Video details extract
-    video_obj = msg.video if msg.video else None
-    doc_obj = msg.document if msg.document else None
-    
     # Title extract
     raw_caption = msg.caption if msg.caption else ""
     if raw_caption.strip():
         title = clean_title(raw_caption)
     else:
         filename = None
-        if doc_obj and doc_obj.file_name:
-            filename = doc_obj.file_name
-        elif video_obj and video_obj.file_name:
-            filename = video_obj.file_name
-        
+        if msg.document and msg.document.file_name:
+            filename = msg.document.file_name
+        elif msg.video and msg.video.file_name:
+            filename = msg.video.file_name
         if filename:
             title = clean_title(os.path.splitext(filename)[0])
         else:
@@ -1908,73 +1906,71 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
             caption=""
         )
         video_file_url = construct_file_url(CP_CHANNEL_ID, copied.message_id)
-        logger.info(f"✅ CP Video copied to {CP_CHANNEL_ID}, message_id: {copied.message_id}")
+        logger.info(f"✅ CP Video copied to {CP_CHANNEL_ID}")
     except Exception as e:
         await status.edit_text(f"❌ Upload failed: {e}")
         return CP_WAIT_VIDEO
     
-    # Function ko 'async def' hona zaroori hai
-
-    raw_poster_id = None
-    if video_obj and video_obj.thumbnail:
-        raw_poster_id = video_obj.thumbnail.file_id
-    elif doc_obj and doc_obj.thumbnail:
-        raw_poster_id = doc_obj.thumbnail.file_id
-
-    valid_poster_id = None
-    if raw_poster_id:
-        try:
-            # Convert thumbnail to VALID photo file_id
-            temp_photo = await context.bot.send_photo(
-                chat_id=msg.chat_id,  # Use admin chat for temp conversion
-                photo=raw_poster_id,
-                caption=""
-            )
-            valid_poster_id = temp_photo.photo[-1].file_id
-            await temp_photo.delete()
-            logger.info(f"✅ CP poster converted: thumbnail → photo file_id")
-        except Exception as e:
-            logger.error(f"❌ Poster conversion failed: {e}")
-
-    # Fallback: Create placeholder if conversion fails
-    if not valid_poster_id:
-        placeholder = await create_placeholder_thumbnail(title)
-        if placeholder:
-            try:
-                temp_photo = await context.bot.send_photo(
-                    chat_id=msg.chat_id,
-                    photo=placeholder,
-                    caption=""
-                )
-                valid_poster_id = temp_photo.photo[-1].file_id
-                await temp_photo.delete()
-                logger.info(f"✅ CP placeholder created")
-            except Exception as e:
-                logger.error(f"❌ Placeholder failed: {e}")
-
-    # ... yahan aapka baaki ka code aayega (status.edit_text aur return) ...
-
-    # Ise bhi same level par indent karein
+    # Temporary save in user_data
+    context.user_data['cp_title'] = title
+    context.user_data['cp_video_url'] = video_file_url
+    
     await status.edit_text(
         f"✅ <b>Video Uploaded!</b>\n\n"
         f"📝 Title: {html_escape(title)}\n"
-        f"📹 Video: CP Channel mein saved\n"
-        f"🖼️ Poster: {'✅ Ready' if valid_poster_id else '❌ Missing'}\n\n"
-        f"💰 <b>Step 2:</b> Price enter karo (₹)\n\n"
+        f"📹 Video: CP Channel mein saved\n\n"
+        f"🖼️ <b>Step 2:</b> Ab poster image bhejo\n"
+        f"   (Photo bhejo jo free channel mein dikhega)\n\n"
+        f"❌ Cancel: /cancel",
+        parse_mode='HTML'
+    )
+    
+    return CP_WAIT_IMAGE
+
+async def get_cp_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Receive poster image, convert to valid photo file_id, store"""
+    msg = update.message
+    
+    if msg.text and msg.text.strip().lower() == '/cancel':
+        context.user_data.clear()
+        await msg.reply_text("❌ Cancelled!")
+        return ConversationHandler.END
+    
+    if not msg.photo:
+        await msg.reply_text("❌ Please send a PHOTO (image) as poster!")
+        return CP_WAIT_IMAGE
+    
+    # Get the largest photo file_id
+    poster_file_id = msg.photo[-1].file_id
+    
+    # Validate by sending temp photo to ensure it's usable later
+    try:
+        temp = await context.bot.send_photo(
+            chat_id=msg.chat_id,
+            photo=poster_file_id,
+            caption=""
+        )
+        valid_poster_id = temp.photo[-1].file_id
+        await temp.delete()
+        logger.info("✅ CP poster validated")
+    except Exception as e:
+        logger.error(f"❌ Poster validation failed: {e}")
+        # Fallback: use original file_id
+        valid_poster_id = poster_file_id
+    
+    context.user_data['cp_poster_id'] = valid_poster_id
+    
+    await msg.reply_text(
+        f"✅ <b>Poster Image Saved!</b>\n\n"
+        f"💰 <b>Step 3:</b> Price enter karo (₹)\n\n"
         f"Example: <code>50</code>\n"
         f"Leave blank for default (50)\n\n"
         f"❌ Cancel: /cancel",
         parse_mode='HTML'
     )
     
-    # Temporary save in user_data for next step
-    context.user_data['cp_title'] = title
-    context.user_data['cp_video_url'] = video_file_url
-    context.user_data['cp_poster_id'] = valid_poster_id
-    
     return CP_WAIT_AMOUNT
-
-
+    
 async def get_cp_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Amount save aur database entry create"""
     msg = update.message
@@ -1994,6 +1990,13 @@ async def get_cp_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = context.user_data.get('cp_title', 'Untitled')
     video_url = context.user_data.get('cp_video_url')
     poster_id = context.user_data.get('cp_poster_id')
+    
+    # --- नया चेक (अगर पोस्टर या वीडियो नहीं है तो एरर) ---
+    if not video_url or not poster_id:
+        await msg.reply_text("❌ Missing data! Please restart with /cp")
+        context.user_data.clear()
+        return ConversationHandler.END
+    # -------------------------------------------------
     
     # Database mein save
     conn = None
@@ -2481,7 +2484,7 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
 
         # ⚠️ CP Payment Approval
     if data.startswith("approve_cp_"):
-        if user.id != ADMIN_USER_ID:
+        if user.id not in ADMIN_USER_IDS:
             await query.answer("❌ Admin only!", show_alert=True)
             return
         
@@ -2579,7 +2582,7 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
         
         return
     if data.startswith("approve_"):
-        if user.id != ADMIN_USER_ID:
+        if user.id not in ADMIN_USER_IDS:
             await query.answer("❌ Only admin!", show_alert=True)
             return
         parts = data.split("_")
@@ -2653,7 +2656,7 @@ async def provider_handle_callback(update: Update, context: ContextTypes.DEFAULT
         return
 
     if data.startswith("reject_"):
-        if user.id != ADMIN_USER_ID:
+        if user.id not in ADMIN_USER_IDS:
             await query.answer("❌ Only admin!", show_alert=True)
             return
         target_user_id = int(data.split("_")[1])
@@ -3687,13 +3690,19 @@ async def run_bots():
     )
     
     # ⚠️ CP Conversation Handler
-    cp_conv = ConversationHandler(
+        cp_conv = ConversationHandler(
         entry_points=[CommandHandler('cp', start_cp_upload)],
         states={
             CP_WAIT_VIDEO: [
                 CommandHandler('cancel', cancel_cp_flow),
                 CommandHandler('start', admin_start),
                 MessageHandler(filters.ALL & ~filters.COMMAND, get_cp_video),
+            ],
+            CP_WAIT_IMAGE: [
+                CommandHandler('cancel', cancel_cp_flow),
+                CommandHandler('start', admin_start),
+                MessageHandler(filters.PHOTO, get_cp_image),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u,c: u.message.reply_text("❌ Please send a PHOTO!"))
             ],
             CP_WAIT_AMOUNT: [
                 CommandHandler('cancel', cancel_cp_flow),
@@ -3703,27 +3712,6 @@ async def run_bots():
         },
         fallbacks=[
             CommandHandler('cancel', cancel_cp_flow),
-            CommandHandler('start', admin_start),
-        ],
-        allow_reentry=True
-    )
-    
-    # Ye lines ab properly 4-space indented hain
-    main_app.add_handler(cp_conv)
-    main_app.add_handler(upload_conv)   # 👈 Yeh line add karo
-
-    bulk_conv = ConversationHandler(
-        entry_points=[CommandHandler('bulk', start_bulk_upload)],
-        states={
-            BULK_WAIT_VIDEO: [
-                CommandHandler('done', process_bulk_video),
-                CommandHandler('cancel', cancel_admin_flow),
-                CommandHandler('start', admin_start),
-                MessageHandler(filters.ALL & ~filters.COMMAND, process_bulk_video),
-            ]
-        },
-        fallbacks=[
-            CommandHandler('cancel', cancel_admin_flow),
             CommandHandler('start', admin_start),
         ],
         allow_reentry=True
