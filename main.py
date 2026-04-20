@@ -2940,9 +2940,18 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_cp_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cp_id: int):
     """CP video payment QR"""
-    msg = update.message
-    chat_id = msg.chat_id
-    user = update.effective_user
+    # Check if called from callback query or direct message
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()  # Important: acknowledge the button press
+        msg = query.message
+        chat_id = msg.chat_id
+        user = query.from_user
+    else:
+        msg = update.message
+        chat_id = msg.chat_id
+        user = update.effective_user
+    
     user_name = user.first_name
     
     # Check already purchased
