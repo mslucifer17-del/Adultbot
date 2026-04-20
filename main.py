@@ -2892,50 +2892,53 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur.close()
     except Exception as e:
         logger.error(f"CP list DB error: {e}")
-        await msg.reply_text("❌ Database error. Try again later.")
+        err = await msg.reply_text("❌ Database error. Try again later.")
+        asyncio.create_task(schedule_delete(context, chat_id, err.message_id, TEXT_DELETE_TIME))
         return
     finally:
         if conn:
             db_pool.putconn(conn)
 
     if not cp_videos:
-        await msg.reply_text("❌ <b>No videos available!</b>\n\n🔔 Check back later.", parse_mode='HTML')
+        err = await msg.reply_text("❌ <b>No videos available!</b>\n\n🔔 Check back later.", parse_mode='HTML')
+        asyncio.create_task(schedule_delete(context, chat_id, err.message_id, TEXT_DELETE_TIME))
         return
 
     # स्टार्ट मैसेज को डिलीट करें
     await msg.delete()
 
-    # 2. हर वीडियो को अलग-अलग भेजें, साथ में बटन
+    # 2. हर वीडियो को अलग-अलग भेजें, साथ में बटन, और हर मैसेज को ऑटो-डिलीट पर सेट करें
     for cp_id, title, poster_id, price in cp_videos:
         if not poster_id:
-            continue   # बिना पोस्टर वाली वीडियो छोड़ दें
+            continue
 
-        # कैप्शन तैयार करें
         caption = f"🎬 <b>{html_escape(title[:80])}</b>\n\n💰 <b>Price:</b> ₹{price}"
 
-        # 🔥 इनलाइन बटन बनाएँ (बटन पर ही प्राइस दिखेगा)
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"💸 Buy for ₹{price}", callback_data=f"cp_buy_{cp_id}")]
         ])
 
         try:
-            await context.bot.send_photo(
+            sent_msg = await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=poster_id,
                 caption=caption,
                 parse_mode='HTML',
                 reply_markup=keyboard
             )
+            # ✅ ऑटो-डिलीट शेड्यूल करें (फोटो भी डिलीट होगी)
+            asyncio.create_task(schedule_delete(context, chat_id, sent_msg.message_id, AUTO_DELETE_TIME))
         except Exception as e:
             logger.error(f"❌ Failed to send poster for CP {cp_id}: {e}")
-            # फेल होने पर टेक्स्ट फॉलबैक
-            await context.bot.send_message(
+            # फोटो नहीं भेज पाए तो टेक्स्ट फॉलबैक (यह भी डिलीट होगा)
+            fallback = await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"{caption}\n\n🆔 ID: <code>{cp_id}</code>",
                 parse_mode='HTML',
                 reply_markup=keyboard
             )
-        await asyncio.sleep(0.5)   # Telegram rate limit से बचने के लिए थोड़ा रुकें
+            asyncio.create_task(schedule_delete(context, chat_id, fallback.message_id, AUTO_DELETE_TIME))
+        await asyncio.sleep(0.5)   # Rate limit से बचें
 
 
 async def show_cp_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cp_id: int):
