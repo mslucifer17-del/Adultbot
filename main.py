@@ -3690,7 +3690,7 @@ async def run_bots():
     )
     
     # ⚠️ CP Conversation Handler
-        cp_conv = ConversationHandler(
+    cp_conv = ConversationHandler(
         entry_points=[CommandHandler('cp', start_cp_upload)],
         states={
             CP_WAIT_VIDEO: [
@@ -3716,6 +3716,9 @@ async def run_bots():
         ],
         allow_reentry=True
     )
+    
+    # Isko add karna zaroori hai, warna cp_conv kaam nahi karega
+    main_app.add_handler(cp_conv) 
     
     main_app.add_handler(bulk_conv)
     main_app.add_handler(CommandHandler('start', admin_start))
