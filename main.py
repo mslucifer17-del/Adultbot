@@ -6,7 +6,7 @@ import logging
 import aiohttp
 import psycopg2
 from urllib.parse import quote
-from telegram import InputMediaPhoto
+from telegram import InputMediaPhoto, Bot
 from html import escape as html_escape
 from psycopg2 import pool
 from flask import Flask, redirect
@@ -1947,12 +1947,38 @@ async def get_cp_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Invalid image! Dobara bhejo.")
         return CP_WAIT_IMAGE
     
-    # Save poster
-    context.user_data['cp_poster_id'] = poster_file_id
+    # Save poster as PROVIDER BOT file_id (cross-bot compatible for cp_list)
+    saved_poster_id = poster_file_id
+    try:
+        if not PROVIDER_BOT_TOKEN:
+            raise Exception("PROVIDER_BOT_TOKEN missing")
+        if not CP_CHANNEL_ID:
+            raise Exception("CP_CHANNEL_ID missing")
+
+        provider_bot = Bot(token=PROVIDER_BOT_TOKEN)
+        src_file = await context.bot.get_file(poster_file_id)
+        poster_bytes = BytesIO()
+        await src_file.download_to_memory(out=poster_bytes)
+        poster_bytes.seek(0)
+        poster_bytes.name = f"cp_poster_{int(datetime.now().timestamp())}.jpg"
+
+        cp_poster_msg = await provider_bot.send_photo(
+            chat_id=CP_CHANNEL_ID,
+            photo=poster_bytes,
+            caption=""
+        )
+        if cp_poster_msg.photo:
+            saved_poster_id = cp_poster_msg.photo[-1].file_id
+            logger.info("✅ CP poster uploaded via provider bot and file_id saved")
+    except Exception as e:
+        logger.warning(f"⚠️ Provider poster upload failed, using original file_id: {e}")
+
+    context.user_data['cp_poster_id'] = saved_poster_id
     
     await msg.reply_text(
         f"✅ <b>POSTER IMAGE SAVED!</b>\n\n"
-        f"🖼️ Yeh image FREE channel + user ko milega\n\n"
+        f"🖼️ Yeh image FREE channel + user ko milega\n"
+        f"📦 File ID safely stored for cp_list\n\n"
         f"💰 <b>Amount enter karo:</b>\n"
         f"<code>50</code> ya blank (default ₹50)\n\n"
         f"❌ Cancel: /cancel",
