@@ -3656,7 +3656,8 @@ async def run_bots():
     )
     
     # Isko add karna zaroori hai, warna cp_conv kaam nahi karega
-    main_app.add_handler(cp_conv) 
+    main_app.add_handler(cp_conv)
+    main_app.add_handler(upload_conv)
     
     main_app.add_handler(bulk_conv)
     main_app.add_handler(CommandHandler('start', admin_start))
