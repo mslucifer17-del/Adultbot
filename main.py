@@ -1928,7 +1928,7 @@ async def get_cp_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CP_WAIT_IMAGE
 
 async def get_cp_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Receive poster image, convert to valid photo file_id, store"""
+    """Receive poster image, upload to CP_CHANNEL, store message_id"""
     msg = update.message
     
     if msg.text and msg.text.strip().lower() == '/cancel':
@@ -1940,25 +1940,24 @@ async def get_cp_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Please send a PHOTO (image) as poster!")
         return CP_WAIT_IMAGE
     
-    # Get the largest photo file_id
-    poster_file_id = msg.photo[-1].file_id
-    
-    # Validate by sending temp photo to ensure it's usable later
+    # 🔥 Poster image ko CP_CHANNEL mein upload karo
+    status = await msg.reply_text("⏳ Uploading poster to CP channel...")
     try:
-        temp = await context.bot.send_photo(
-            chat_id=msg.chat_id,
-            photo=poster_file_id,
-            caption=""
+        copied = await context.bot.copy_message(
+            chat_id=CP_CHANNEL_ID,
+            from_chat_id=msg.chat_id,
+            message_id=msg.message_id,
+            caption=""  # Caption nahi chahiye
         )
-        valid_poster_id = temp.photo[-1].file_id
-        await temp.delete()
-        logger.info("✅ CP poster validated")
+        poster_msg_id = copied.message_id
+        logger.info(f"✅ Poster uploaded to CP_CHANNEL, msg_id={poster_msg_id}")
+        await status.edit_text("✅ Poster uploaded!")
     except Exception as e:
-        logger.error(f"❌ Poster validation failed: {e}")
-        # Fallback: use original file_id
-        valid_poster_id = poster_file_id
+        await status.edit_text(f"❌ Poster upload failed: {e}")
+        return CP_WAIT_IMAGE
     
-    context.user_data['cp_poster_id'] = valid_poster_id
+    # Store poster_msg_id instead of file_id
+    context.user_data['cp_poster_msg_id'] = poster_msg_id
     
     await msg.reply_text(
         f"✅ <b>Poster Image Saved!</b>\n\n"
@@ -1980,34 +1979,31 @@ async def get_cp_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("❌ Cancelled!")
         return ConversationHandler.END
     
-    # Amount parse
     amount_text = msg.text.strip() if msg.text else ""
     if amount_text.isdigit():
         amount = int(amount_text)
     else:
-        amount = 50  # Default
+        amount = 50
     
     title = context.user_data.get('cp_title', 'Untitled')
     video_url = context.user_data.get('cp_video_url')
-    poster_id = context.user_data.get('cp_poster_id')
+    poster_msg_id = context.user_data.get('cp_poster_msg_id')
     
-    # --- नया चेक (अगर पोस्टर या वीडियो नहीं है तो एरर) ---
-    if not video_url or not poster_id:
+    if not video_url or not poster_msg_id:
         await msg.reply_text("❌ Missing data! Please restart with /cp")
         context.user_data.clear()
         return ConversationHandler.END
-    # -------------------------------------------------
     
-    # Database mein save
+    # 🔥 Database mein poster_msg_id save karein
     conn = None
     cp_id = None
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            """INSERT INTO cp_videos (title, video_file_url, poster_file_id, price)
+            """INSERT INTO cp_videos (title, video_file_url, poster_msg_id, price)
                VALUES (%s, %s, %s, %s) RETURNING cp_id""",
-            (title, video_url, poster_id, amount)
+            (title, video_url, poster_msg_id, amount)
         )
         cp_id = cur.fetchone()[0]
         conn.commit()
@@ -2879,14 +2875,13 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"CP list requested by user {user.id}")
 
-    # 1. Database से सारी CP videos लाएँ
     conn = None
     cp_videos = []
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
-            "SELECT cp_id, title, poster_file_id, price FROM cp_videos ORDER BY created_at DESC LIMIT 50"
+            "SELECT cp_id, title, poster_msg_id, price FROM cp_videos ORDER BY created_at DESC LIMIT 50"
         )
         cp_videos = cur.fetchall()
         cur.close()
@@ -2904,33 +2899,31 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         asyncio.create_task(schedule_delete(context, chat_id, err.message_id, TEXT_DELETE_TIME))
         return
 
-    # स्टार्ट मैसेज को डिलीट करें
     await msg.delete()
 
-    # 2. हर वीडियो को अलग-अलग भेजें, साथ में बटन, और हर मैसेज को ऑटो-डिलीट पर सेट करें
-    for cp_id, title, poster_id, price in cp_videos:
-        if not poster_id:
+    for cp_id, title, poster_msg_id, price in cp_videos:
+        if not poster_msg_id:
             continue
 
         caption = f"🎬 <b>{html_escape(title[:80])}</b>\n\n💰 <b>Price:</b> ₹{price}"
-
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"💸 Buy for ₹{price}", callback_data=f"cp_buy_{cp_id}")]
         ])
 
         try:
-            sent_msg = await context.bot.send_photo(
+            # 🔥 Poster image ko CP_CHANNEL se copy karke user ko bhejo
+            sent_msg = await context.bot.copy_message(
                 chat_id=chat_id,
-                photo=poster_id,
+                from_chat_id=CP_CHANNEL_ID,
+                message_id=poster_msg_id,
                 caption=caption,
                 parse_mode='HTML',
                 reply_markup=keyboard
             )
-            # ✅ ऑटो-डिलीट शेड्यूल करें (फोटो भी डिलीट होगी)
             asyncio.create_task(schedule_delete(context, chat_id, sent_msg.message_id, AUTO_DELETE_TIME))
         except Exception as e:
-            logger.error(f"❌ Failed to send poster for CP {cp_id}: {e}")
-            # फोटो नहीं भेज पाए तो टेक्स्ट फॉलबैक (यह भी डिलीट होगा)
+            logger.error(f"❌ Failed to copy poster for CP {cp_id}: {e}")
+            # Fallback: text bhejo
             fallback = await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"{caption}\n\n🆔 ID: <code>{cp_id}</code>",
@@ -2938,7 +2931,7 @@ async def show_cp_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=keyboard
             )
             asyncio.create_task(schedule_delete(context, chat_id, fallback.message_id, AUTO_DELETE_TIME))
-        await asyncio.sleep(0.5)   # Rate limit से बचें
+        await asyncio.sleep(0.5)
 
 
 async def show_cp_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, cp_id: int):
