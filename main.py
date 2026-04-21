@@ -57,7 +57,7 @@ GPLINKS_API_KEY = os.environ.get("GPLINKS_API_KEY")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
     logger.info("✅ Fixed DATABASE_URL format for psycopg2")
 
 WEB_DOMAIN = os.environ.get("WEB_DOMAIN", "https://my-bot.onrender.com").strip()
