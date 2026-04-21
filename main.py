@@ -284,6 +284,13 @@ def clean_title(raw_title):
     if not raw_title:
         return "Exclusive Premium Content"
 
+    # Remove known promo/footer blocks before line-wise cleanup
+    raw_title = re.sub(
+        r'(?is)@LiteAdultVault\s*[\r\n]+👇🏻\s*🔗\s*BELOW IS YOUR LINK\s*👇🏻\s*[\r\n]+https?://\S+',
+        '',
+        raw_title
+    )
+
     lines = raw_title.split('\n')
     cleaned_lines = []
 
@@ -294,6 +301,10 @@ def clean_title(raw_title):
             'watch and download' in lower_line or
             'how to open' in lower_line or
             'ʜᴏᴡ ᴛᴏ ᴏᴘᴇɴ' in lower_line or
+            'uploaded by' in lower_line or
+            'below is your link' in lower_line or
+            'liteadultvault' in lower_line or
+            'midnightdesire_robot' in lower_line or
             '╔══' in line or
             '╚══' in line or
             '📥' in line or
