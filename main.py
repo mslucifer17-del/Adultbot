@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, time as dt_time
 from io import BytesIO
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters, ContextTypes, ConversationHandler
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 )
 
 # Force unbuffered output for better logging
@@ -24,30 +24,29 @@ sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
 try:
-    import qrcode
-    QR_AVAILABLE = True
+    import qrcode
+    QR_AVAILABLE = True
 except ImportError:
-    QR_AVAILABLE = False
-    print("⚠️ qrcode not available - will use text fallback")
+    QR_AVAILABLE = False
+    print("⚠️ qrcode not available - will use text fallback")
 
 # PIL import with fallback
 try:
-    from PIL import Image, ImageEnhance, ImageFilter, ImageDraw, ImageFont
-    PIL_AVAILABLE = True
+    from PIL import Image, ImageEnhance, ImageFilter, ImageDraw, ImageFont
+    PIL_AVAILABLE = True
 except ImportError:
-    PIL_AVAILABLE = False
-    print("⚠️ PIL/Pillow not available - thumbnail enhancement disabled")
+    PIL_AVAILABLE = False
+    print("⚠️ PIL/Pillow not available - thumbnail enhancement disabled")
 
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 print("=" * 60)
 print("🚀 APPLICATION STARTING - ENHANCED v3.0...")
 print("=" * 60)
-
 # ================= ENVIRONMENT VARIABLES =================
 print("\n📋 Loading environment variables...")
 
